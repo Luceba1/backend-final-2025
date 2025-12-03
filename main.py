@@ -14,7 +14,7 @@ from starlette.responses import JSONResponse
 
 from config.logging_config import setup_logging
 from config.database import create_tables, engine
-from config.redis_config import redis_config, check_redis_connection
+from config.redis_config import check_redis_connection
 from middleware.rate_limiter import RateLimiterMiddleware
 from middleware.request_id_middleware import RequestIDMiddleware
 
