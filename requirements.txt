@@ -22,7 +22,8 @@ h11
 Deprecated
 wrapt
 
-# Seguridad / opcional según tu backend
 passlib[bcrypt]
 python-jose
 
+# Redis Upstash (NECESARIO)
+upstash-redis
