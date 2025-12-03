@@ -7,6 +7,7 @@ from config.settings import Settings
 
 logger = logging.getLogger("services.cache_service")
 
+
 class CacheService:
     def __init__(self):
         settings = Settings()
@@ -30,23 +31,28 @@ class CacheService:
             self.available = False
 
     # ---------------------------------------------------------------------
-    # ✔️ ACÁ ESTÁ EL MÉTODO QUE FALTABA
+    # ✔️ build_key compatible con kwargs (skip, limit, id, etc.)
     # ---------------------------------------------------------------------
-    def build_key(self, *parts) -> str:
+    def build_key(self, *parts, **kwargs) -> str:
         """
-        Construye claves con formato uniforme.
-        Ejemplo: build_key("categories", "list", "limit", 100) 
-        → "categories:list:limit:100"
+        Construye claves como:
+        categories:list:skip:0:limit:100
         """
-        return ":".join(str(p) for p in parts)
+        key = ":".join(str(p) for p in parts)
 
+        # Agregar kwargs en orden alfabético para consistencia
+        for k, v in sorted(kwargs.items()):
+            key += f":{k}:{v}"
+
+        return key
+
+    # ---------------------------------------------------------------------
     def is_available(self) -> bool:
         return self.available
 
     # ---------------------------------------------------------------------
-    # TTL manual porque Upstash NO tiene expire()
+    # TTL manual porque Upstash NO soporta expire()
     # ---------------------------------------------------------------------
-
     def set(self, key: str, value: Any, ttl_seconds: int = 300) -> None:
         if not self.is_available():
             return
@@ -83,10 +89,12 @@ class CacheService:
             expires_at = data.get("expires_at")
             value = data.get("value")
 
+            # Expirado → eliminar
             if expires_at and time.time() > expires_at:
                 self.redis.delete(key)
                 return None
 
+            # Si viene como string JSON → decodificar
             if isinstance(value, str):
                 try:
                     return json.loads(value)
@@ -125,9 +133,6 @@ class CacheService:
             logger.error(f"Redis CLEAR PREFIX error: {e}")
 
 
-# instancia global
+# Instancia global
 cache_service = CacheService()
-
-
-
 
