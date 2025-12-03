@@ -50,7 +50,7 @@ class CategoryService(BaseServiceImpl):
         categories = super().get_all(skip, limit)
 
         categories_dict = [c.model_dump() for c in categories]
-        self.cache.set(cache_key, categories_dict, ttl=self.cache_ttl)
+        self.cache.set(cache_key, categories_dict, ttl_seconds=self.cache_ttl)
 
         return categories
 
