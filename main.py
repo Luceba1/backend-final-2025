@@ -63,17 +63,18 @@ def create_fastapi_app() -> FastAPI:
     fastapi_app.add_middleware(RequestIDMiddleware)
     logger.info("✅ Request ID middleware enabled")
 
-    vercel_url = os.getenv("FRONTEND_URL", "http://localhost:5500")
-
+    # -----------------------------------------
+    # ✔️ CORS definitivo — acepta TODO *.vercel.app
+    # -----------------------------------------
     fastapi_app.add_middleware(
         CORSMiddleware,
-        allow_origins=[vercel_url, "http://localhost:5500", "http://127.0.0.1:5500"],
+        allow_origin_regex=r"https://.*\.vercel\.app",
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
 
-    logger.info(f"✅ CORS enabled for {vercel_url}")
+    logger.info("✅ CORS enabled for *.vercel.app (wildcard)")
 
     @fastapi_app.on_event("startup")
     async def startup_event():
@@ -106,3 +107,4 @@ def run_app(fastapi_app: FastAPI):
 if __name__ == "__main__":
     create_tables()
     run_app(app)
+
