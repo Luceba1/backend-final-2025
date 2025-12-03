@@ -12,17 +12,18 @@ logger = get_sanitized_logger(__name__)
 
 class CacheService:
     """
-    Servicio de caché seguro y compatible con todo el backend original.
+    Cache totalmente compatible con Upstash Redis.
+    No usa ninguna función que Upstash NO soporte.
     """
 
     def __init__(self):
         self.redis_client = get_redis_client()
         self.enabled = os.getenv("REDIS_ENABLED", "true").lower() == "true"
         self.default_ttl = int(os.getenv("REDIS_CACHE_TTL", "300"))  # 5 min
-        self.lock_timeout = 10
+        self.lock_timeout = 10  # segundos
 
     # -----------------------------
-    # ESTADO BÁSICO
+    # Estado
     # -----------------------------
     def is_available(self) -> bool:
         return self.enabled and self.redis_client is not None
@@ -35,32 +36,46 @@ class CacheService:
             return None
 
         try:
-            value = self.redis_client.get(key)
-            if value is None:
+            raw = self.redis_client.get(key)
+            if raw is None:
                 return None
 
+            # Upstash devuelve string literal
             try:
-                return json.loads(value)
+                data = json.loads(raw)
             except:
-                return value
+                return raw
+
+            # TTL manual
+            expires_at = data.get("expires_at")
+            value = data.get("value")
+
+            if expires_at and time.time() > expires_at:
+                self.delete(key)
+                return None
+
+            return value
 
         except Exception as e:
             logger.error(f"Cache GET error for '{key}': {e}")
             return None
 
     # -----------------------------
-    # SET
+    # SET (con TTL manual)
     # -----------------------------
     def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         if not self.is_available():
             return False
 
         try:
-            if not isinstance(value, str):
-                value = json.dumps(value)
+            expires_at = time.time() + (ttl or self.default_ttl)
 
-            ttl = ttl or self.default_ttl
-            self.redis_client.setex(key, ttl, value)
+            payload = json.dumps({
+                "value": value,
+                "expires_at": expires_at
+            })
+
+            self.redis_client.set(key, payload)
             return True
 
         except Exception as e:
@@ -68,7 +83,7 @@ class CacheService:
             return False
 
     # -----------------------------
-    # DELETE KEY
+    # DELETE
     # -----------------------------
     def delete(self, key: str) -> bool:
         if not self.is_available():
@@ -82,144 +97,83 @@ class CacheService:
             return False
 
     # -----------------------------
-    # DELETE PATTERN (NECESARIO PARA SERVICES)
+    # DELETE PATTERN (emulado sin KEYS)
     # -----------------------------
     def delete_pattern(self, pattern: str) -> int:
         """
-        El backend original usa esta función.
-        Upstash soporta KEYS, así que es seguro.
+        Emula un 'keys' usando SCAN (que Upstash sí soporta).
         """
         if not self.is_available():
             return 0
 
         try:
-            keys = self.redis_client.keys(pattern)
-            if keys:
-                return self.redis_client.delete(*keys)
-            return 0
+            deleted = 0
+            cursor = "0"
+
+            while True:
+                cursor, keys = self.redis_client.scan(cursor=cursor, match=pattern)
+
+                for k in keys:
+                    self.redis_client.delete(k)
+                    deleted += 1
+
+                if cursor == "0":
+                    break
+
+            return deleted
+
         except Exception as e:
             logger.error(f"Cache DELETE PATTERN error for '{pattern}': {e}")
             return 0
 
     # -----------------------------
-    # CLEAR ALL
+    # GET OR SET (lock distribuido)
     # -----------------------------
-    def clear_all(self) -> bool:
-        if not self.is_available():
-            return False
-
-        try:
-            self.redis_client.flushdb()
-            return True
-        except Exception as e:
-            logger.error(f"Cache CLEAR ALL error: {e}")
-            return False
-
-    # -----------------------------
-    # GET OR SET (con lock distribuido)
-    # -----------------------------
-    def get_or_set(
-        self,
-        key: str,
-        callback: Callable[[], Any],
-        ttl: Optional[int] = None,
-        max_retries: int = 3,
-        retry_delay: float = 0.1,
-    ):
+    def get_or_set(self, key: str, callback: Callable[[], Any], ttl: Optional[int] = None):
         if not self.is_available():
             return callback()
 
-        cached_value = self.get(key)
-        if cached_value is not None:
-            return cached_value
+        cached = self.get(key)
+        if cached is not None:
+            return cached
 
         lock_key = f"lock:{key}"
 
-        for attempt in range(max_retries):
+        try:
+            lock = self.redis_client.set(lock_key, "1", nx=True, ex=self.lock_timeout)
+        except:
+            return callback()
+
+        if lock:
             try:
-                lock_acquired = self.redis_client.set(
-                    lock_key,
-                    "1",
-                    nx=True,
-                    ex=self.lock_timeout,
-                )
-            except Exception:
-                return callback()
+                cached = self.get(key)
+                if cached is not None:
+                    return cached
 
-            if lock_acquired:
+                value = callback()
+                self.set(key, value, ttl)
+                return value
+
+            finally:
                 try:
-                    cached_value = self.get(key)
-                    if cached_value is not None:
-                        return cached_value
+                    self.redis_client.delete(lock_key)
+                except:
+                    pass
 
-                    value = callback()
-                    self.set(key, value, ttl)
-                    return value
-
-                finally:
-                    try:
-                        self.redis_client.delete(lock_key)
-                    except:
-                        pass
-
-            time.sleep(retry_delay)
-
-            cached_value = self.get(key)
-            if cached_value is not None:
-                return cached_value
+        # si no tomó lock, esperar y reintentar acceso al cache
+        time.sleep(0.1)
+        cached = self.get(key)
+        if cached is not None:
+            return cached
 
         value = callback()
         self.set(key, value, ttl)
         return value
 
     # -----------------------------
-    # INCREMENT
-    # -----------------------------
-    def increment(self, key: str, amount: int = 1) -> Optional[int]:
-        if not self.is_available():
-            return None
-
-        try:
-            return self.redis_client.incrby(key, amount)
-        except Exception as e:
-            logger.error(f"Cache INCREMENT error for '{key}': {e}")
-            return None
-
-    # -----------------------------
-    # EXPIRE
-    # -----------------------------
-    def expire(self, key: str, ttl: int) -> bool:
-        if not self.is_available():
-            return False
-
-        try:
-            return self.redis_client.expire(key, ttl)
-        except Exception as e:
-            logger.error(f"Cache EXPIRE error for '{key}': {e}")
-            return False
-
-    # -----------------------------
-    # TTL
-    # -----------------------------
-    def get_ttl(self, key: str) -> Optional[int]:
-        if not self.is_available():
-            return None
-
-        try:
-            ttl = self.redis_client.ttl(key)
-            return ttl if ttl > 0 else None
-        except Exception as e:
-            logger.error(f"Cache TTL error: {e}")
-            return None
-
-    # -----------------------------
-    # BUILD KEY (COMPATIBLE CON TODO TU BACKEND)
+    # BUILD KEY (compatible total)
     # -----------------------------
     def build_key(self, *parts, **kwargs) -> str:
-        """
-        Compatible con:
-            build_key("categories", "list", skip=0, limit=20)
-        """
         key_parts = [str(p) for p in parts]
 
         for k, v in kwargs.items():
@@ -230,5 +184,4 @@ class CacheService:
 
 
 cache_service = CacheService()
-
 
