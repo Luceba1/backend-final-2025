@@ -27,3 +27,5 @@ python-jose
 
 # Redis Upstash (NECESARIO)
 upstash-redis
+pydantic-settings
+
