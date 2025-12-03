@@ -1,77 +1,89 @@
 import json
 import logging
 from typing import Any, Optional
-
 from config.redis_config import redis_client
 
 logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# 🔥 Utilidades internas
+# 🔥 Helpers internos para Upstash
 # ============================================================
 
-def _decode(result: Any) -> Optional[str]:
-    """
-    Upstash devuelve:
-    { "result": "valor" }
-    o None si no existe.
-
-    Esta función devuelve siempre SOLO el valor.
-    """
-    if result is None:
+async def _send(cmd: list):
+    """Upstash ejecuta los comandos como listas tipo ["SET", key, val]."""
+    try:
+        res = await redis_client.send(cmd)
+        if isinstance(res, dict) and "result" in res:
+            return res["result"]
+        return res
+    except Exception as e:
+        logger.error(f"Redis command error {cmd}: {e}")
         return None
 
-    if isinstance(result, dict) and "result" in result:
-        return result["result"]
 
-    return result
-
-
-async def _set_with_ttl(key: str, value: str, ttl: int):
-    """
-    SET + TTL usando comando REST:
-    ["SET", key, value, "EX", ttl]
-    """
-    try:
-        await redis_client.send(["SET", key, value, "EX", str(ttl)])
-    except Exception as e:
-        logger.error(f"Cache SET error for key '{key}': {e}")
-
-
-async def _get(key: str) -> Optional[str]:
+async def _get(key: str):
     try:
         res = await redis_client.get(key)
-        return _decode(res)
+        if isinstance(res, dict) and "result" in res:
+            return res["result"]
+        return res
     except Exception as e:
-        logger.error(f"Cache GET error for key '{key}': {e}")
+        logger.error(f"Redis GET error for {key}: {e}")
         return None
 
 
-async def _delete(key: str):
+# ============================================================
+# 🔥 Simulaciones de métodos que tus clases ya usan
+# ============================================================
+
+async def setex(key: str, ttl: int, value: str):
+    """
+    Simula redis.setex(key, ttl, value)
+    → SET key value EX ttl
+    """
+    return await _send(["SET", key, value, "EX", str(ttl)])
+
+
+async def expire(key: str, ttl: int):
+    """
+    Simula redis.expire(key, ttl)
+    → EXPIRE key ttl
+    """
+    return await _send(["EXPIRE", key, str(ttl)])
+
+
+async def delete(key: str):
+    """
+    Simula redis.delete(key)
+    """
     try:
-        await redis_client.delete(key)
+        return await redis_client.delete(key)
     except Exception as e:
-        logger.error(f"Cache DELETE error for key '{key}': {e}")
+        logger.error(f"Redis DELETE error for {key}: {e}")
+        return None
+
+
+async def get(key: str) -> Optional[str]:
+    """
+    Simula redis.get(key)
+    Devuelve siempre un string real o None.
+    """
+    return await _get(key)
 
 
 # ============================================================
-# 🔥 API pública del servicio de caché
+# 🔥 API pública usada por tus services
 # ============================================================
 
 async def cache_set_json(key: str, data: Any, ttl: int = 60):
-    """
-    Guarda JSON con TTL usando Upstash REST.
-    """
-    value = json.dumps(data)
-    await _set_with_ttl(key, value, ttl)
+    """Tus servicios llaman a esto."""
+    data_json = json.dumps(data)
+    return await setex(key, ttl, data_json)
 
 
-async def cache_get_json(key: str) -> Optional[Any]:
-    """
-    Recupera JSON desde Redis.
-    """
-    val = await _get(key)
+async def cache_get_json(key: str):
+    val = await get(key)
     if val is None:
         return None
 
@@ -81,71 +93,6 @@ async def cache_get_json(key: str) -> Optional[Any]:
         return None
 
 
-async def cache_set_text(key: str, data: str, ttl: int = 60):
-    """Guarda string plano con TTL."""
-    await _set_with_ttl(key, data, ttl)
-
-
-async def cache_get_text(key: str) -> Optional[str]:
-    """Obtiene string plano."""
-    return await _get(key)
-
-
 async def cache_delete(key: str):
-    """Elimina una clave del caché."""
-    await _delete(key)
+    return await delete(key)
 
-
-# ============================================================
-# 🔥 Invalidación de listas por modelo
-# ============================================================
-
-async def invalidate_list_cache(prefix: str):
-    """
-    Como Upstash REST **NO soporta KEYS**, no podemos borrar por patrón.
-
-    Solución:
-    - Todas las claves de listas deben formarse así:
-      f"{prefix}:list:{...}"
-
-    - Guardamos una segunda clave "control" con la lista de keys.
-    """
-    control_key = f"{prefix}:_keys"
-
-    try:
-        raw = await _get(control_key)
-        if not raw:
-            return
-
-        keys = json.loads(raw)
-
-        for k in keys:
-            await _delete(k)
-
-        # borrar control
-        await _delete(control_key)
-
-    except Exception as e:
-        logger.error(f"Error invalidating cache for prefix '{prefix}': {e}")
-
-
-async def register_list_key(prefix: str, key: str):
-    """
-    Registra cada clave creada para poder invalidarla después.
-    """
-    control_key = f"{prefix}:_keys"
-
-    try:
-        raw = await _get(control_key)
-        if raw:
-            keys = json.loads(raw)
-        else:
-            keys = []
-
-        if key not in keys:
-            keys.append(key)
-
-        await _set_with_ttl(control_key, json.dumps(keys), 3600)
-
-    except Exception as e:
-        logger.error(f"Error registering list key '{key}': {e}")
