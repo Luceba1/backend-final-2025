@@ -122,7 +122,7 @@ def create_fastapi_app() -> FastAPI:
     async def startup_event():
         logger.info("🚀 Starting FastAPI E-commerce API...")
 
-        if await check_redis_connection():
+        if check_redis_connection():
             logger.info("✅ Redis cache available (Upstash REST)")
         else:
             logger.warning("⚠️ Redis not available — running without cache")
