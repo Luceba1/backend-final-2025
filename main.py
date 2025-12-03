@@ -36,32 +36,37 @@ from repositories.base_repository_impl import InstanceNotFoundError
 
 
 # ================================================================
-# 🔥 Rate Limiter compatible con Upstash REST (sin pipeline)
+# 🔥 Rate Limiter compatible con Upstash REST (SIN await)
 # ================================================================
-async def rate_limiter(request: Request, call_next):
+def rate_limiter_sync(request: Request):
     ip = request.client.host
     key = f"rate_limit:{ip}"
 
     try:
-        # obtener valor
-        current = await redis_client.get(key)
+        current = redis_client.get(key)
+
+        # Primer request → contador = 1
         if current is None:
-            # primera vez → setear TTL 60s
-            await redis_client.set(key, "1", ex=60)
-        else:
-            count = int(current)
-            if count >= 100:  # límite
-                return JSONResponse(
-                    status_code=429,
-                    content={"detail": "Too many requests. Try again later."}
-                )
-            await redis_client.set(key, str(count + 1), ex=60)
+            redis_client.set(key, "1", ex=60)
+            return None
+
+        count = int(current)
+
+        # Excedió límite
+        if count >= 100:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too many requests. Try again later."}
+            )
+
+        # Incrementar valor
+        redis_client.set(key, str(count + 1), ex=60)
+
     except Exception as e:
         logger.error(f"Rate limiter error: {e}")
-        # seguir sin rate limit si redis falla
-        return await call_next(request)
+        return None
 
-    return await call_next(request)
+    return None
 
 
 # ================================================================
@@ -113,9 +118,17 @@ def create_fastapi_app() -> FastAPI:
 
     logger.info(f"✅ CORS enabled for {vercel_url}")
 
-    # Rate limiting (Upstash compatible)
-    fastapi_app.middleware("http")(rate_limiter)
-    logger.info("🔥 Custom Rate Limiting enabled (Upstash compatible)")
+    # =====================================================
+    # 🔥 Middleware real — Rate limit Upstash REST compatible
+    # =====================================================
+    @fastapi_app.middleware("http")
+    async def rate_limit_middleware(request: Request, call_next):
+        result = rate_limiter_sync(request)
+        if isinstance(result, JSONResponse):
+            return result
+        return await call_next(request)
+
+    logger.info("🔥 Custom Rate Limiting enabled (Upstash REST compatible)")
 
     # Startup event
     @fastapi_app.on_event("startup")
@@ -156,4 +169,3 @@ app = create_fastapi_app()
 if __name__ == "__main__":
     create_tables()
     run_app(app)
-
