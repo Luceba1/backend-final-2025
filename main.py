@@ -21,6 +21,8 @@ from middleware.request_id_middleware import RequestIDMiddleware
 # Setup centralized logging FIRST
 setup_logging()
 logger = logging.getLogger(__name__)
+
+# Controllers
 from controllers.address_controller import AddressController
 from controllers.bill_controller import BillController
 from controllers.category_controller import CategoryController
@@ -30,6 +32,7 @@ from controllers.order_detail_controller import OrderDetailController
 from controllers.product_controller import ProductController
 from controllers.review_controller import ReviewController
 from controllers.health_check import router as health_check_controller
+
 from repositories.base_repository_impl import InstanceNotFoundError
 
 
@@ -40,7 +43,6 @@ def create_fastapi_app() -> FastAPI:
     Returns:
         FastAPI: Configured FastAPI application instance
     """
-    # API metadata
     fastapi_app = FastAPI(
         title="E-commerce REST API",
         description="FastAPI REST API for e-commerce system with PostgreSQL",
@@ -58,87 +60,63 @@ def create_fastapi_app() -> FastAPI:
             content={"message": str(exc)},
         )
 
-    client_controller = ClientController()
-    fastapi_app.include_router(client_controller.router, prefix="/clients")
-
-    order_controller = OrderController()
-    fastapi_app.include_router(order_controller.router, prefix="/orders")
-
-    product_controller = ProductController()
-    fastapi_app.include_router(product_controller.router, prefix="/products")
-
-    address_controller = AddressController()
-    fastapi_app.include_router(address_controller.router, prefix="/addresses")
-
-    bill_controller = BillController()
-    fastapi_app.include_router(bill_controller.router, prefix="/bills")
-
-    order_detail_controller = OrderDetailController()
-    fastapi_app.include_router(order_detail_controller.router, prefix="/order_details")
-
-    review_controller = ReviewController()
-    fastapi_app.include_router(review_controller.router, prefix="/reviews")
-
-    category_controller = CategoryController()
-    fastapi_app.include_router(category_controller.router, prefix="/categories")
-
+    # Routers
+    fastapi_app.include_router(ClientController().router, prefix="/clients")
+    fastapi_app.include_router(OrderController().router, prefix="/orders")
+    fastapi_app.include_router(ProductController().router, prefix="/products")
+    fastapi_app.include_router(AddressController().router, prefix="/addresses")
+    fastapi_app.include_router(BillController().router, prefix="/bills")
+    fastapi_app.include_router(OrderDetailController().router, prefix="/order_details")
+    fastapi_app.include_router(ReviewController().router, prefix="/reviews")
+    fastapi_app.include_router(CategoryController().router, prefix="/categories")
     fastapi_app.include_router(health_check_controller, prefix="/health_check")
 
-    # Add middleware (LIFO order - last added runs first)
-    # Request ID middleware runs FIRST (innermost) to capture all logs
+    # Middleware
     fastapi_app.add_middleware(RequestIDMiddleware)
-    logger.info("✅ Request ID middleware enabled (distributed tracing)")
+    logger.info("✅ Request ID middleware enabled")
 
-    # CORS configuration for Vercel + localhost
     vercel_url = os.getenv("FRONTEND_URL", "http://localhost:5500")
+
     fastapi_app.add_middleware(
         CORSMiddleware,
         allow_origins=[
             vercel_url,
             "http://localhost:5500",
             "http://127.0.0.1:5500",
-         ],
-         allow_credentials=True,
-         allow_methods=["*"],
-         allow_headers=["*"],
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
-
     logger.info(f"✅ CORS enabled for {vercel_url}")
 
-    # Rate limiting: 100 requests per 60 seconds per IP (configurable via env)
     fastapi_app.add_middleware(RateLimiterMiddleware, calls=100, period=60)
-    logger.info("✅ Rate limiting enabled: 100 requests/60s per IP")
+    logger.info("✅ Rate limiting enabled: 100 req/60s")
 
-    # Startup event: Check Redis connection
+    # Startup event
     @fastapi_app.on_event("startup")
     async def startup_event():
-        """Run on application startup"""
         logger.info("🚀 Starting FastAPI E-commerce API...")
 
-        # Check Redis connection
         if check_redis_connection():
-            logger.info("✅ Redis cache is available")
+            logger.info("✅ Redis cache available")
         else:
-            logger.warning("⚠️  Redis cache is NOT available - running without cache")
+            logger.warning("⚠️  Redis not available — running without cache")
 
-    # Shutdown event: Graceful shutdown
+    # Shutdown event
     @fastapi_app.on_event("shutdown")
     async def shutdown_event():
-        """Graceful shutdown - close all connections"""
-        logger.info("👋 Shutting down FastAPI E-commerce API...")
+        logger.info("👋 Shutting down FastAPI API...")
 
-        # Close Redis connection
-        try:
-            redis_config.close()
-            logger.info("✅ Redis connection closed")
-        except Exception as e:
-            logger.error(f"❌ Error closing Redis: {e}")
+        # Redis Upstash no usa conexiones TCP
+        logger.info("ℹ️ No Redis connection to close (Upstash REST client)")
 
-        # Close database engine
+        # Close DB engine
         try:
-            logger.info("ℹ️ No Redis connection to close (Upstash REST client)")
+            engine.dispose()
+            logger.info("✅ Database engine disposed")
         except Exception as e:
-             logger.error(f"❌ Error during Redis shutdown: {e}")
+            logger.error(f"❌ Error disposing engine: {e}")
 
         logger.info("✅ Shutdown complete")
 
@@ -146,15 +124,19 @@ def create_fastapi_app() -> FastAPI:
 
 
 def run_app(fastapi_app: FastAPI):
+    """Run using uvicorn (local only). Render ignores this."""
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(fastapi_app, host="0.0.0.0", port=port)
-    app = create_fastapi_app()
+
+
+# 🔥 REQUIRED BY RENDER — global app object
+app = create_fastapi_app()
 
 
 if __name__ == "__main__":
-    # Create database tables on startup
+    # Create tables locally (Render uses migrations)
     create_tables()
 
-    # Create and run FastAPI application
-    app = create_fastapi_app()
+    # Run locally
     run_app(app)
+
