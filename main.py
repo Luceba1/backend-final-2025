@@ -136,10 +136,9 @@ def create_fastapi_app() -> FastAPI:
 
         # Close database engine
         try:
-            engine.dispose()
-            logger.info("✅ Database engine disposed")
+            logger.info("ℹ️ No Redis connection to close (Upstash REST client)")
         except Exception as e:
-            logger.error(f"❌ Error disposing database engine: {e}")
+             logger.error(f"❌ Error during Redis shutdown: {e}")
 
         logger.info("✅ Shutdown complete")
 
@@ -149,6 +148,7 @@ def create_fastapi_app() -> FastAPI:
 def run_app(fastapi_app: FastAPI):
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(fastapi_app, host="0.0.0.0", port=port)
+    app = create_fastapi_app()
 
 
 if __name__ == "__main__":
