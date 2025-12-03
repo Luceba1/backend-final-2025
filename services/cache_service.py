@@ -7,8 +7,7 @@ serialization, TTL management, error handling, and distributed cache stampede pr
 import json
 import logging
 import time
-from typing import Optional, Any, List, Callable
-from datetime import timedelta
+from typing import Optional, Any, Callable
 import os
 
 from config.redis_config import get_redis_client
@@ -39,15 +38,7 @@ class CacheService:
         return self.enabled and self.redis_client is not None
 
     def get(self, key: str) -> Optional[Any]:
-        """
-        Get value from cache
-
-        Args:
-            key: Cache key
-
-        Returns:
-            Cached value or None if not found or cache unavailable
-        """
+        """Get value from cache"""
         if not self.is_available():
             return None
 
@@ -56,39 +47,21 @@ class CacheService:
             if value is None:
                 return None
 
-            # Try to deserialize JSON
             try:
                 return json.loads(value)
             except (json.JSONDecodeError, TypeError):
-                # Return raw value if not JSON
                 return value
 
         except Exception as e:
             logger.error(f"Cache GET error for key '{key}': {e}")
             return None
 
-    def set(
-        self,
-        key: str,
-        value: Any,
-        ttl: Optional[int] = None
-    ) -> bool:
-        """
-        Set value in cache
-
-        Args:
-            key: Cache key
-            value: Value to cache (will be JSON serialized if possible)
-            ttl: Time to live in seconds (default: REDIS_CACHE_TTL)
-
-        Returns:
-            True if successful, False otherwise
-        """
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+        """Set value in cache with TTL"""
         if not self.is_available():
             return False
 
         try:
-            # Serialize to JSON if not a string
             if not isinstance(value, str):
                 value = json.dumps(value)
 
@@ -101,15 +74,7 @@ class CacheService:
             return False
 
     def delete(self, key: str) -> bool:
-        """
-        Delete key from cache
-
-        Args:
-            key: Cache key to delete
-
-        Returns:
-            True if deleted, False otherwise
-        """
+        """Delete a key"""
         if not self.is_available():
             return False
 
@@ -120,15 +85,13 @@ class CacheService:
             logger.error(f"Cache DELETE error for key '{key}': {e}")
             return False
 
+    # ----------------------------------------------------------------------
+    # ⭐ NUEVO — COMPATIBILIDAD TOTAL CON TU BACKEND
+    # ----------------------------------------------------------------------
     def delete_pattern(self, pattern: str) -> int:
         """
-        Delete all keys matching pattern
-
-        Args:
-            pattern: Redis pattern (e.g., "products:*")
-
-        Returns:
-            Number of keys deleted
+        Compatibilidad con servicios que esperan delete_pattern().
+        Borra todas las keys que coincidan con el patrón.
         """
         if not self.is_available():
             return 0
@@ -136,25 +99,22 @@ class CacheService:
         try:
             keys = self.redis_client.keys(pattern)
             if keys:
-                return self.redis_client.delete(*keys)
+                deleted = self.redis_client.delete(*keys)
+                return deleted
             return 0
         except Exception as e:
             logger.error(f"Cache DELETE PATTERN error for '{pattern}': {e}")
             return 0
+    # ----------------------------------------------------------------------
 
     def clear_all(self) -> bool:
-        """
-        Clear all cache (use with caution!)
-
-        Returns:
-            True if successful
-        """
+        """Clear all cache"""
         if not self.is_available():
             return False
 
         try:
             self.redis_client.flushdb()
-            logger.warning("⚠️  All cache cleared!")
+            logger.warning("⚠️ All cache cleared!")
             return True
         except Exception as e:
             logger.error(f"Cache CLEAR ALL error: {e}")
@@ -169,132 +129,51 @@ class CacheService:
         retry_delay: float = 0.1
     ) -> Any:
         """
-        Get value from cache or compute and cache it with distributed stampede protection
-
-        This method uses DISTRIBUTED Redis locks to ensure that when cache expires,
-        only ONE worker/process/thread recomputes the value while others wait.
-        This is safe for multi-worker deployments (unlike threading.Lock).
-
-        Args:
-            key: Cache key
-            callback: Function to call if cache miss
-            ttl: Time to live in seconds
-            max_retries: Maximum retries to acquire lock
-            retry_delay: Delay between retries in seconds
-
-        Returns:
-            Cached or computed value
-
-        Example:
-            # Without stampede protection (BAD):
-            # Cache expires at 12:00:00
-            # 100 requests across 8 workers at 12:00:01 -> 100 DB queries!
-
-            # With distributed lock stampede protection (GOOD):
-            # Cache expires at 12:00:00
-            # Worker 1 / Request 1 acquires Redis lock, calls callback()
-            # Workers 2-8 / Requests 2-100 wait and retry
-            # All requests get the cached result
+        Get or compute value with stampede protection using distributed Redis locks.
         """
         if not self.is_available():
-            # Redis not available - compute directly without caching
-            logger.warning(f"Redis unavailable, computing without cache: {key}")
             return callback()
 
-        # Try to get from cache (fast path)
-        cached_value = self.get(key)
-        if cached_value is not None:
-            logger.debug(f"Cache HIT: {key}")
-            return cached_value
+        cached = self.get(key)
+        if cached is not None:
+            return cached
 
-        # Cache miss - need to recompute with distributed stampede protection
-        logger.debug(f"Cache MISS: {key}")
-
-        # Build lock key
         lock_key = f"lock:{key}"
 
-        # Try to acquire distributed lock
         for attempt in range(max_retries):
-            # Try to set lock with NX (only if not exists) and EX (expiration)
             lock_acquired = self.redis_client.set(
-                lock_key,
-                "1",
-                nx=True,  # Only set if key doesn't exist
-                ex=self.lock_timeout  # Auto-expire after timeout
+                lock_key, "1", nx=True, ex=self.lock_timeout
             )
 
             if lock_acquired:
-                # We got the lock! Compute and cache the value
-                logger.debug(f"Lock acquired for: {key}")
                 try:
-                    # Double-check cache (another process may have filled it)
-                    cached_value = self.get(key)
-                    if cached_value is not None:
-                        logger.debug(f"Cache HIT after lock: {key}")
-                        return cached_value
+                    cached = self.get(key)
+                    if cached is not None:
+                        return cached
 
-                    # Compute value
-                    logger.info(f"Computing value for cache key: {key}")
                     value = callback()
 
-                    # Store in cache
                     self.set(key, value, ttl)
 
                     return value
 
-                except Exception as e:
-                    logger.error(f"Error computing value for cache key '{key}': {e}")
-                    raise
-
                 finally:
-                    # Always release the lock
                     try:
                         self.redis_client.delete(lock_key)
-                        logger.debug(f"Lock released for: {key}")
                     except Exception as e:
                         logger.error(f"Error releasing lock for '{key}': {e}")
 
             else:
-                # Lock already held by another process/worker
-                # Wait a bit and retry to get cached result
-                logger.debug(
-                    f"Lock held by another process for '{key}', "
-                    f"retry {attempt + 1}/{max_retries}"
-                )
                 time.sleep(retry_delay)
+                cached = self.get(key)
+                if cached is not None:
+                    return cached
 
-                # Check if cache was filled while waiting
-                cached_value = self.get(key)
-                if cached_value is not None:
-                    logger.debug(f"Cache HIT after waiting: {key}")
-                    return cached_value
-
-        # Failed to acquire lock after all retries
-        # Fallback: compute without lock (better than failing)
-        logger.warning(
-            f"Failed to acquire lock for '{key}' after {max_retries} retries, "
-            f"computing without lock"
-        )
-        try:
-            value = callback()
-            # Try to cache anyway (best effort)
-            self.set(key, value, ttl)
-            return value
-        except Exception as e:
-            logger.error(f"Error in fallback computation for '{key}': {e}")
-            raise
+        value = callback()
+        self.set(key, value, ttl)
+        return value
 
     def increment(self, key: str, amount: int = 1) -> Optional[int]:
-        """
-        Increment counter (useful for rate limiting)
-
-        Args:
-            key: Counter key
-            amount: Amount to increment
-
-        Returns:
-            New value or None if cache unavailable
-        """
         if not self.is_available():
             return None
 
@@ -305,16 +184,6 @@ class CacheService:
             return None
 
     def expire(self, key: str, ttl: int) -> bool:
-        """
-        Set expiration on existing key
-
-        Args:
-            key: Cache key
-            ttl: Time to live in seconds
-
-        Returns:
-            True if successful
-        """
         if not self.is_available():
             return False
 
@@ -325,15 +194,6 @@ class CacheService:
             return False
 
     def get_ttl(self, key: str) -> Optional[int]:
-        """
-        Get remaining TTL for key
-
-        Args:
-            key: Cache key
-
-        Returns:
-            Remaining seconds or None
-        """
         if not self.is_available():
             return None
 
@@ -346,31 +206,17 @@ class CacheService:
 
     def build_key(self, prefix: str, *args, **kwargs) -> str:
         """
-        Build cache key from components
-
-        Args:
-            prefix: Key prefix (e.g., "products")
-            *args: Positional components
-            **kwargs: Named components
-
-        Returns:
-            Formatted cache key
-
-        Example:
-            build_key("products", "list", skip=0, limit=10)
-            => "products:list:skip:0:limit:10"
+        Build consistent cache keys
         """
         parts = [prefix]
 
-        # Add positional args
         parts.extend(str(arg) for arg in args)
 
-        # Add keyword args in sorted order for consistency
         for k, v in sorted(kwargs.items()):
             parts.extend([k, str(v)])
 
         return ":".join(parts)
 
 
-# Global cache service instance
+# Global instance
 cache_service = CacheService()
