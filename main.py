@@ -4,14 +4,14 @@ Main application module for FastAPI e-commerce REST API.
 import os
 import uvicorn
 import logging
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from starlette import status
 from starlette.responses import JSONResponse
 
 from config.logging_config import setup_logging
 from config.database import create_tables, engine
-from config.redis_config import check_redis_connection, redis_client
+from config.redis_config import check_redis_connection
 from middleware.request_id_middleware import RequestIDMiddleware
 
 # Setup logging
@@ -32,44 +32,6 @@ from controllers.health_check import router as health_check_controller
 from repositories.base_repository_impl import InstanceNotFoundError
 
 
-# ================================================================
-# 🔥 RATE LIMITER — COMPATIBLE CON UPSTASH REST
-# ================================================================
-def rate_limiter_sync(request: Request):
-    ip = request.client.host
-    key = f"rate_limit:{ip}"
-
-    try:
-        current = redis_client.get(key)
-
-        if current is None:
-            # Primera vez → set + expire usando REST correcto
-            redis_client.set(key, "1")
-            redis_client.expire(key, 60)
-            return None
-
-        count = int(current)
-
-        if count >= 100:
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Too many requests. Try again later."}
-            )
-
-        # Incrementar
-        redis_client.set(key, str(count + 1))
-        redis_client.expire(key, 60)
-
-    except Exception as e:
-        logger.error(f"Rate limiter error: {e}")
-        return None  # si redis falla → no frena la API
-
-    return None
-
-
-# ================================================================
-# 🔥 CREATE FASTAPI APP
-# ================================================================
 def create_fastapi_app() -> FastAPI:
 
     fastapi_app = FastAPI(
@@ -79,7 +41,6 @@ def create_fastapi_app() -> FastAPI:
         redoc_url="/redoc"
     )
 
-    # ----------------- Exception Handler -----------------
     @fastapi_app.exception_handler(InstanceNotFoundError)
     async def instance_not_found_handler(request, exc):
         return JSONResponse(
@@ -87,7 +48,7 @@ def create_fastapi_app() -> FastAPI:
             content={"message": str(exc)},
         )
 
-    # --------------------- Routers -----------------------
+    # Routers
     fastapi_app.include_router(ClientController().router, prefix="/clients")
     fastapi_app.include_router(OrderController().router, prefix="/orders")
     fastapi_app.include_router(ProductController().router, prefix="/products")
@@ -98,7 +59,7 @@ def create_fastapi_app() -> FastAPI:
     fastapi_app.include_router(CategoryController().router, prefix="/categories")
     fastapi_app.include_router(health_check_controller, prefix="/health_check")
 
-    # --------------------- Middleware ---------------------
+    # Middleware
     fastapi_app.add_middleware(RequestIDMiddleware)
     logger.info("✅ Request ID middleware enabled")
 
@@ -114,27 +75,15 @@ def create_fastapi_app() -> FastAPI:
 
     logger.info(f"✅ CORS enabled for {vercel_url}")
 
-    # Rate limit efectivo
-    @fastapi_app.middleware("http")
-    async def rate_limit_middleware(request: Request, call_next):
-        result = rate_limiter_sync(request)
-        if isinstance(result, JSONResponse):
-            return result
-        return await call_next(request)
-
-    logger.info("🔥 Custom Rate Limiting enabled (Upstash REST compatible)")
-
-    # ----------------------- Startup -----------------------
     @fastapi_app.on_event("startup")
     async def startup_event():
         logger.info("🚀 Starting FastAPI E-commerce API...")
 
         if check_redis_connection():
-            logger.info("✅ Redis cache available (Upstash REST)")
+            logger.info("✅ Redis cache available")
         else:
             logger.warning("⚠️ Redis NOT available")
 
-    # ----------------------- Shutdown ----------------------
     @fastapi_app.on_event("shutdown")
     async def shutdown_event():
         logger.info("👋 Shutting down API...")
@@ -147,15 +96,9 @@ def create_fastapi_app() -> FastAPI:
     return fastapi_app
 
 
-# ================================================================
-# 🔥 REQUIRED BY RENDER
-# ================================================================
 app = create_fastapi_app()
 
 
-# ================================================================
-# 🔥 LOCAL UVICORN
-# ================================================================
 def run_app(fastapi_app: FastAPI):
     uvicorn.run(fastapi_app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
 
@@ -163,5 +106,3 @@ def run_app(fastapi_app: FastAPI):
 if __name__ == "__main__":
     create_tables()
     run_app(app)
-
-
