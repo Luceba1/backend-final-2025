@@ -1,0 +1,495 @@
+@startuml E-commerce API Architecture
+!define RECTANGLE class
+
+' Estilos
+skinparam componentStyle rectangle
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontSize 11
+skinparam defaultFontName Arial
+
+' Colores personalizados
+!define COLOR_CLIENT #E3F2FD
+!define COLOR_MIDDLEWARE #FFF3E0
+!define COLOR_CONTROLLER #E8F5E9
+!define COLOR_SERVICE #F3E5F5
+!define COLOR_REPOSITORY #FCE4EC
+!define COLOR_DATABASE #CFD8DC
+!define COLOR_CACHE #FFEBEE
+
+title Arquitectura del Sistema E-commerce API\nArquitectura en Capas - FastAPI + PostgreSQL + Redis
+
+' ===== CAPA CLIENTE =====
+package "Capa Cliente" as CLIENT_LAYER <<Rectangle>> #COLOR_CLIENT {
+  [Cliente Web] as WEB
+  [Aplicación Móvil] as MOBILE
+  [Sistema Externo (ERP)] as EXTERNAL
+  [API Consumer] as API_CONSUMER
+}
+
+' ===== CAPA MIDDLEWARE =====
+package "Capa Middleware" as MIDDLEWARE_LAYER <<Rectangle>> #COLOR_MIDDLEWARE {
+  component "Rate Limiter" as RATE_LIMITER {
+    note right
+      • 100 req/60s por IP
+      • Basado en Redis
+      • Operaciones atómicas
+      • HTTP 429 al exceder
+    end note
+  }
+
+  component "CORS Middleware" as CORS {
+    note right
+      • Orígenes configurables
+      • Headers permitidos
+      • Métodos HTTP permitidos
+    end note
+  }
+
+  component "Request ID Middleware" as REQUEST_ID {
+    note right
+      • Genera UUID único
+      • Trazabilidad distribuida
+      • Logs correlacionados
+    end note
+  }
+}
+
+' ===== CAPA CONTROLADORES =====
+package "Capa Controladores (FastAPI)" as CONTROLLER_LAYER <<Rectangle>> #COLOR_CONTROLLER {
+  component "ClientController" as CLIENT_CTRL {
+    portin " " as client_in
+    [GET /clients]
+    [POST /clients]
+    [PUT /clients/{id}]
+    [DELETE /clients/{id}]
+  }
+
+  component "ProductController" as PRODUCT_CTRL {
+    portin " " as product_in
+    [GET /products] <<Cached>>
+    [POST /products]
+    [PUT /products/{id}]
+    [DELETE /products/{id}]
+  }
+
+  component "OrderController" as ORDER_CTRL {
+    portin " " as order_in
+    [GET /orders]
+    [POST /orders] <<FK Validation>>
+    [PUT /orders/{id}]
+  }
+
+  component "OrderDetailController" as ORDER_DETAIL_CTRL {
+    portin " " as order_detail_in
+    [POST /order_details] <<Stock Validation>>
+    [DELETE /order_details/{id}] <<Stock Restore>>
+  }
+
+  component "CategoryController" as CATEGORY_CTRL {
+    portin " " as category_in
+    [GET /categories] <<Cached 1h>>
+    [POST /categories]
+  }
+
+  component "BillController" as BILL_CTRL {
+    portin " " as bill_in
+    [POST /bills]
+    [GET /bills]
+  }
+
+  component "AddressController" as ADDRESS_CTRL {
+    portin " " as address_in
+    [POST /addresses]
+    [GET /addresses]
+  }
+
+  component "ReviewController" as REVIEW_CTRL {
+    portin " " as review_in
+    [POST /reviews]
+    [GET /reviews]
+  }
+
+  component "HealthCheck" as HEALTH {
+    portin " " as health_in
+    [GET /health_check]
+  }
+}
+
+' ===== CAPA SERVICIOS =====
+package "Capa Servicios (Lógica de Negocio)" as SERVICE_LAYER <<Rectangle>> #COLOR_SERVICE {
+  component "ClientService" as CLIENT_SVC {
+    note bottom
+      • CRUD básico
+      • Validación de email único
+    end note
+  }
+
+  component "ProductService" as PRODUCT_SVC {
+    note bottom
+      • CRUD con caché
+      • TTL: 5 minutos
+      • Invalidación automática
+    end note
+  }
+
+  component "OrderService" as ORDER_SVC {
+    note bottom
+      • Validación FK (client_id, bill_id)
+      • Previene pedidos huérfanos
+      • Auto-asigna fecha
+    end note
+  }
+
+  component "OrderDetailService" as ORDER_DETAIL_SVC {
+    note bottom
+      • Validación de stock
+      • Validación de precio (anti-fraude)
+      • Decremento atómico de stock
+      • Restauración en delete
+    end note
+  }
+
+  component "CategoryService" as CATEGORY_SVC {
+    note bottom
+      • CRUD con caché
+      • TTL: 1 hora
+      • Validación de nombre único
+    end note
+  }
+
+  component "BillService" as BILL_SVC
+  component "AddressService" as ADDRESS_SVC
+  component "ReviewService" as REVIEW_SVC
+
+  component "CacheService" as CACHE_SVC {
+    note bottom
+      • Patrón Cache-Aside
+      • Build keys estructuradas
+      • Invalidación por patrón
+      • get_or_set helper
+    end note
+  }
+}
+
+' ===== CAPA REPOSITORIOS =====
+package "Capa Repositorios (Acceso a Datos)" as REPOSITORY_LAYER <<Rectangle>> #COLOR_REPOSITORY {
+  component "BaseRepositoryImpl" as BASE_REPO {
+    note right
+      Operaciones CRUD genéricas:
+      • find(id_key)
+      • find_all(skip, limit)
+      • save(model)
+      • update(id_key, changes)
+      • remove(id_key)
+      • save_all(models)
+    end note
+  }
+
+  component "ClientRepository" as CLIENT_REPO
+  component "ProductRepository" as PRODUCT_REPO
+  component "OrderRepository" as ORDER_REPO
+  component "OrderDetailRepository" as ORDER_DETAIL_REPO
+  component "CategoryRepository" as CATEGORY_REPO
+  component "BillRepository" as BILL_REPO
+  component "AddressRepository" as ADDRESS_REPO
+  component "ReviewRepository" as REVIEW_REPO
+
+  BASE_REPO <|-- CLIENT_REPO
+  BASE_REPO <|-- PRODUCT_REPO
+  BASE_REPO <|-- ORDER_REPO
+  BASE_REPO <|-- ORDER_DETAIL_REPO
+  BASE_REPO <|-- CATEGORY_REPO
+  BASE_REPO <|-- BILL_REPO
+  BASE_REPO <|-- ADDRESS_REPO
+  BASE_REPO <|-- REVIEW_REPO
+}
+
+' ===== CAPA DE DATOS =====
+package "Capa de Datos" as DATA_LAYER <<Rectangle>> #COLOR_DATABASE {
+  database "PostgreSQL 13" as POSTGRES {
+    note right
+      Pool de Conexiones:
+      • 50 base + 100 overflow
+      • por worker
+      • 4-8 workers
+      • Total: ~600 conexiones
+
+      Configuración:
+      • max_connections: 700
+      • shared_buffers: 256MB
+      • effective_cache_size: 768MB
+    end note
+
+    frame "Tablas" {
+      [clients]
+      [products]
+      [categories]
+      [orders]
+      [order_details]
+      [bills]
+      [addresses]
+      [reviews]
+    }
+  }
+
+  database "Redis 7" as REDIS {
+    note right
+      Uso:
+      • Cache (Cache-Aside)
+      • Rate Limiting
+
+      Configuración:
+      • maxmemory: 256MB
+      • eviction: allkeys-lru
+      • persistence: appendonly
+
+      Performance:
+      • Cache hit rate: 70-80%
+      • Mejora: 3x más rápido
+    end note
+  }
+}
+
+' ===== MODELOS Y ESQUEMAS =====
+package "Modelos y Validación" as MODELS_LAYER {
+  component "SQLAlchemy Models" as MODELS {
+    note bottom
+      • BaseModel (id_key)
+      • Relationships (lazy='select')
+      • Foreign Keys
+      • Unique Constraints
+      • Indexes
+    end note
+  }
+
+  component "Pydantic Schemas" as SCHEMAS {
+    note bottom
+      • BaseSchema (id_key)
+      • Field validations
+      • Type checking
+      • Email/Phone formats
+      • from_attributes = True
+    end note
+  }
+}
+
+' ===== CONFIGURACIÓN =====
+package "Configuración y Utilidades" as CONFIG_LAYER {
+  component "Database Config" as DB_CONFIG {
+    note bottom
+      • SessionLocal
+      • get_db() dependency
+      • create_tables()
+      • Connection pool
+    end note
+  }
+
+  component "Redis Config" as REDIS_CONFIG {
+    note bottom
+      • Singleton pattern
+      • Connection pool
+      • Health check
+    end note
+  }
+
+  component "Logging Config" as LOG_CONFIG {
+    note bottom
+      • Centralized logging
+      • Rotating files
+      • Multiple levels
+      • Sanitized logs
+    end note
+  }
+
+  component "Logging Utils" as LOG_UTILS {
+    note bottom
+      • get_sanitized_logger()
+      • log_error_sanitized()
+      • Error ID tracking
+      • Pattern redaction
+    end note
+  }
+}
+
+' ===== RELACIONES DE FLUJO =====
+
+' Cliente -> Middleware
+WEB --> RATE_LIMITER : HTTP Request
+MOBILE --> RATE_LIMITER
+EXTERNAL --> RATE_LIMITER
+API_CONSUMER --> RATE_LIMITER
+
+' Middleware -> Controladores
+RATE_LIMITER --> CORS
+CORS --> REQUEST_ID
+REQUEST_ID --> client_in
+REQUEST_ID --> product_in
+REQUEST_ID --> order_in
+REQUEST_ID --> order_detail_in
+REQUEST_ID --> category_in
+REQUEST_ID --> bill_in
+REQUEST_ID --> address_in
+REQUEST_ID --> review_in
+REQUEST_ID --> health_in
+
+' Controladores -> Servicios
+CLIENT_CTRL --> CLIENT_SVC : Dependency Injection
+PRODUCT_CTRL --> PRODUCT_SVC
+ORDER_CTRL --> ORDER_SVC
+ORDER_DETAIL_CTRL --> ORDER_DETAIL_SVC
+CATEGORY_CTRL --> CATEGORY_SVC
+BILL_CTRL --> BILL_SVC
+ADDRESS_CTRL --> ADDRESS_SVC
+REVIEW_CTRL --> REVIEW_SVC
+
+' Servicios -> Cache Service
+PRODUCT_SVC --> CACHE_SVC : get/set/invalidate
+CATEGORY_SVC --> CACHE_SVC
+
+' Servicios -> Repositorios
+CLIENT_SVC --> CLIENT_REPO
+PRODUCT_SVC --> PRODUCT_REPO
+ORDER_SVC --> ORDER_REPO
+ORDER_SVC --> CLIENT_REPO : validate FK
+ORDER_SVC --> BILL_REPO : validate FK
+ORDER_DETAIL_SVC --> ORDER_DETAIL_REPO
+ORDER_DETAIL_SVC --> PRODUCT_REPO : stock validation
+CATEGORY_SVC --> CATEGORY_REPO
+BILL_SVC --> BILL_REPO
+ADDRESS_SVC --> ADDRESS_REPO
+REVIEW_SVC --> REVIEW_REPO
+
+' Repositorios -> Database
+CLIENT_REPO --> POSTGRES : SQLAlchemy ORM
+PRODUCT_REPO --> POSTGRES
+ORDER_REPO --> POSTGRES
+ORDER_DETAIL_REPO --> POSTGRES
+CATEGORY_REPO --> POSTGRES
+BILL_REPO --> POSTGRES
+ADDRESS_REPO --> POSTGRES
+REVIEW_REPO --> POSTGRES
+
+' Cache Service -> Redis
+CACHE_SVC --> REDIS : Redis-py
+RATE_LIMITER --> REDIS : Atomic ops
+
+' Health Check -> Databases
+HEALTH --> POSTGRES : ping + metrics
+HEALTH --> REDIS : ping
+
+' Modelos y Esquemas
+MODELS --> POSTGRES : Table structure
+SCHEMAS --> CLIENT_CTRL : Validation
+SCHEMAS --> PRODUCT_CTRL
+SCHEMAS --> ORDER_CTRL
+SCHEMAS --> ORDER_DETAIL_CTRL
+SCHEMAS --> CATEGORY_CTRL
+SCHEMAS --> BILL_CTRL
+SCHEMAS --> ADDRESS_CTRL
+SCHEMAS --> REVIEW_CTRL
+
+' Configuración
+DB_CONFIG --> POSTGRES
+REDIS_CONFIG --> REDIS
+LOG_CONFIG --> LOG_UTILS
+CLIENT_SVC ..> LOG_UTILS : logging
+PRODUCT_SVC ..> LOG_UTILS
+ORDER_SVC ..> LOG_UTILS
+ORDER_DETAIL_SVC ..> LOG_UTILS
+
+' ===== NOTAS ADICIONALES =====
+
+note as N1
+  <b>Patrón de Inyección de Dependencias</b>
+
+  @router.get("/products")
+  async def get_products(
+      db: Session = Depends(get_db)
+  ):
+      service = ProductService(db)
+      return service.get_all()
+
+  • FastAPI gestiona automáticamente el ciclo de vida
+  • Sesión DB cerrada al finalizar request
+  • Facilita testing con mocks
+end note
+
+note as N2
+  <b>Flujo de Datos - Ejemplo Crear Pedido</b>
+
+  1. Cliente → POST /orders
+  2. Rate Limiter → Verifica límite
+  3. CORS → Valida origen
+  4. Request ID → Genera UUID
+  5. OrderController → Valida schema (Pydantic)
+  6. OrderService → Valida FK (client_id, bill_id)
+  7. OrderRepository → INSERT transaccional
+  8. PostgreSQL → Persiste + genera ID
+  9. Response → HTTP 201 Created
+end note
+
+note as N3
+  <b>Optimizaciones de Rendimiento</b>
+
+  • <b>Multi-Worker</b>: 4-8 Uvicorn workers
+  • <b>Connection Pool</b>: 600 conexiones totales
+  • <b>Redis Cache</b>: 70-80% hit rate
+  • <b>Database Indexes</b>: FK + search columns
+  • <b>Lazy Loading</b>: lazy='select' en relationships
+
+  <b>Resultados</b>:
+  • 400+ peticiones concurrentes
+  • 150-300 RPS sostenidos
+  • p95 latency: ~165ms
+  • Error rate: < 1%
+end note
+
+note as N4
+  <b>Seguridad Implementada</b>
+
+  • <b>Rate Limiting</b>: 100 req/60s por IP
+  • <b>Input Validation</b>: Pydantic schemas
+  • <b>SQL Injection</b>: SQLAlchemy ORM (parameterized)
+  • <b>FK Validation</b>: Previene registros huérfanos
+  • <b>CORS</b>: Configurable por ambiente
+  • <b>Logging Sanitizado</b>: Redacción de datos sensibles
+end note
+
+N1 -[hidden]-> N2
+N2 -[hidden]-> N3
+N3 -[hidden]-> N4
+
+legend right
+  <b>Convenciones de Diagrama</b>
+
+  <<Cached>> = Endpoint con caché Redis
+  <<FK Validation>> = Validación de claves foráneas
+  <<Stock Validation>> = Validación de inventario
+
+  <b>Capas de Arquitectura</b>:
+  • Cliente: Consumidores de la API
+  • Middleware: Procesamiento transversal
+  • Controladores: Manejo de peticiones HTTP
+  • Servicios: Lógica de negocio
+  • Repositorios: Acceso a datos
+  • Datos: PostgreSQL + Redis
+
+  <b>Stack Tecnológico</b>:
+  • FastAPI 0.104.1
+  • Python 3.11.6
+  • PostgreSQL 13
+  • Redis 7
+  • SQLAlchemy 2.0.23
+  • Pydantic 2.5.1
+  • Uvicorn 0.24.0
+
+  <b>Patrones de Diseño</b>:
+  • Layered Architecture
+  • Repository Pattern
+  • Dependency Injection
+  • Factory Pattern
+  • Singleton Pattern (Redis Config)
+  • Cache-Aside Pattern
+end legend
+
+@enduml

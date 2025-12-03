@@ -1,0 +1,46 @@
+# Environment variables
+.env
+.env.local
+
+# Logs
+git_logs.txt
+logs/
+*.log
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Load test results
+load_test_results.html
+locust_*.html
+
+# Docker volumes
+postgres_data/
+redis_data/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/

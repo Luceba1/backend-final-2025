@@ -1,0 +1,198 @@
+version: '3.8'
+
+services:
+  # Redis Cache - In-memory data store for caching and sessions
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce_redis_prod
+    restart: always
+    command:
+      - "redis-server"
+      - "--maxmemory"
+      - "256mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+      - "--appendonly"
+      - "yes"
+    volumes:
+      - redis_data_prod:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    networks:
+      - ecommerce_network_prod
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PostgreSQL Database - Optimized for high concurrency
+  postgres:
+    image: postgres:13-alpine
+    container_name: ecommerce_postgres_prod
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-ecommerce_prod}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      # PostgreSQL performance tuning
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=C"
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=700"                    # Support 4 workers × 150 connections
+      - "-c"
+      - "shared_buffers=256MB"                   # 25% of RAM (for 1GB RAM)
+      - "-c"
+      - "effective_cache_size=768MB"             # 75% of RAM
+      - "-c"
+      - "maintenance_work_mem=128MB"
+      - "-c"
+      - "checkpoint_completion_target=0.9"
+      - "-c"
+      - "wal_buffers=16MB"
+      - "-c"
+      - "default_statistics_target=100"
+      - "-c"
+      - "random_page_cost=1.1"
+      - "-c"
+      - "effective_io_concurrency=200"
+      - "-c"
+      - "work_mem=16MB"
+      - "-c"
+      - "min_wal_size=1GB"
+      - "-c"
+      - "max_wal_size=4GB"
+      - "-c"
+      - "max_worker_processes=4"
+      - "-c"
+      - "max_parallel_workers_per_gather=2"
+      - "-c"
+      - "max_parallel_workers=4"
+      - "-c"
+      - "max_parallel_maintenance_workers=2"
+    volumes:
+      - postgres_data_prod:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - ecommerce_network_prod
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Application - High concurrency configuration
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+    container_name: ecommerce_api_prod
+    restart: always
+    environment:
+      # Database connection
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-ecommerce_prod}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+
+      # Connection pool (optimized for 400 concurrent requests)
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-50}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-100}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-10}
+      DB_POOL_RECYCLE: ${DB_POOL_RECYCLE:-3600}
+
+      # Uvicorn workers
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-4}
+      API_HOST: ${API_HOST:-0.0.0.0}
+      API_PORT: ${API_PORT:-8000}
+
+      # Performance tuning
+      BACKLOG: ${BACKLOG:-2048}
+      TIMEOUT_KEEP_ALIVE: ${TIMEOUT_KEEP_ALIVE:-5}
+      LIMIT_CONCURRENCY: ${LIMIT_CONCURRENCY:-1000}
+      LIMIT_MAX_REQUESTS: ${LIMIT_MAX_REQUESTS:-10000}
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ACCESS_LOG: ${ACCESS_LOG:-true}
+
+      # Redis connection
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: ${REDIS_DB:-0}
+      REDIS_CACHE_TTL: ${REDIS_CACHE_TTL:-300}
+      REDIS_ENABLED: ${REDIS_ENABLED:-true}
+
+      # Python optimizations
+      PYTHONUNBUFFERED: 1
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ecommerce_network_prod
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health_check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Nginx Reverse Proxy (Optional - recommended for production)
+  nginx:
+    image: nginx:alpine
+    container_name: ecommerce_nginx_prod
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api
+    networks:
+      - ecommerce_network_prod
+    profiles:
+      - with-nginx
+
+volumes:
+  postgres_data_prod:
+    driver: local
+  redis_data_prod:
+    driver: local
+
+networks:
+  ecommerce_network_prod:
+    driver: bridge
+
+# =============================================================================
+# USAGE INSTRUCTIONS
+# =============================================================================
+#
+# Start services:
+#   docker-compose -f docker-compose.production.yaml up -d
+#
+# Start with Nginx reverse proxy:
+#   docker-compose -f docker-compose.production.yaml --profile with-nginx up -d
+#
+# View logs:
+#   docker-compose -f docker-compose.production.yaml logs -f api
+#
+# Scale API (horizontal scaling):
+#   docker-compose -f docker-compose.production.yaml up -d --scale api=3
+#
+# Stop services:
+#   docker-compose -f docker-compose.production.yaml down
+#
+# Monitor database connections:
+#   docker exec ecommerce_postgres_prod psql -U postgres -c \
+#     "SELECT count(*) as active_connections FROM pg_stat_activity;"
+#
+# =============================================================================

@@ -1,0 +1,142 @@
+version: '3.8'
+
+services:
+  # Redis Cache - In-memory data store for caching and rate limiting
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce_redis_dev
+    restart: unless-stopped
+    command:
+      - "redis-server"
+      - "--maxmemory"
+      - "128mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+    volumes:
+      - redis_data_dev:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - ecommerce_network_dev
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:13-alpine
+    container_name: ecommerce_postgres_dev
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres_data_dev:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - ecommerce_network_dev
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # FastAPI Application
+  api:
+    build: .
+    image: ecommerce_api_dev
+    container_name: ecommerce_api_dev
+    restart: unless-stopped
+    environment:
+      # Database connection
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+
+      # Database connection pool (development defaults)
+      DB_POOL_SIZE: 5
+      DB_MAX_OVERFLOW: 10
+      DB_POOL_TIMEOUT: 10
+      DB_POOL_RECYCLE: 3600
+
+      # Redis connection
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      REDIS_ENABLED: "true"
+      REDIS_CACHE_TTL: 300
+      REDIS_MAX_CONNECTIONS: 10
+
+      # Rate limiting
+      RATE_LIMIT_ENABLED: "true"
+      RATE_LIMIT_CALLS: 100
+      RATE_LIMIT_PERIOD: 60
+
+      # Logging
+      LOG_LEVEL: DEBUG
+      ACCESS_LOG: "true"
+
+      # CORS (allow all for development)
+      CORS_ORIGINS: "*"
+
+      # Python optimizations
+      PYTHONUNBUFFERED: 1
+      PYTHONDONTWRITEBYTECODE: 1
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app  # Mount code for hot reload in development
+      - ./logs:/app/logs  # Persist logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ecommerce_network_dev
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health_check"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  postgres_data_dev:
+    driver: local
+  redis_data_dev:
+    driver: local
+
+networks:
+  ecommerce_network_dev:
+    driver: bridge
+
+# =============================================================================
+# USAGE INSTRUCTIONS
+# =============================================================================
+#
+# Start all services:
+#   docker-compose up --build
+#
+# Start in detached mode:
+#   docker-compose up -d
+#
+# View logs:
+#   docker-compose logs -f api
+#
+# Stop services:
+#   docker-compose down
+#
+# Remove volumes (clean start):
+#   docker-compose down -v
+#
+# Check service health:
+#   docker-compose ps
+#
+# =============================================================================
