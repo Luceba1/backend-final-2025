@@ -36,7 +36,7 @@ from repositories.base_repository_impl import InstanceNotFoundError
 
 
 # ================================================================
-# 🔥 Rate Limiter compatible con Upstash REST (SIN await)
+# 🔥 Rate Limiter compatible con Upstash REST (sin pipeline, sin ex)
 # ================================================================
 def rate_limiter_sync(request: Request):
     ip = request.client.host
@@ -45,25 +45,28 @@ def rate_limiter_sync(request: Request):
     try:
         current = redis_client.get(key)
 
-        # Primer request → contador = 1
+        # Primer request → crear clave y setear expiración
         if current is None:
-            redis_client.set(key, "1", ex=60)
+            redis_client.set(key, "1")
+            redis_client.expire(key, 60)  # TTL 60 segundos
             return None
 
         count = int(current)
 
-        # Excedió límite
+        # Límite de 100 req/60s
         if count >= 100:
             return JSONResponse(
                 status_code=429,
                 content={"detail": "Too many requests. Try again later."}
             )
 
-        # Incrementar valor
-        redis_client.set(key, str(count + 1), ex=60)
+        # Incrementar + renovar expiración
+        redis_client.set(key, str(count + 1))
+        redis_client.expire(key, 60)
 
     except Exception as e:
         logger.error(f"Rate limiter error: {e}")
+        # Si redis falla → seguir sin limitar
         return None
 
     return None
@@ -110,12 +113,15 @@ def create_fastapi_app() -> FastAPI:
 
     fastapi_app.add_middleware(
         CORSMiddleware,
-        allow_origins=[vercel_url, "http://localhost:5500", "http://127.0.0.1:5500"],
+        allow_origins=[
+            vercel_url,
+            "http://localhost:5500",
+            "http://127.0.0.1:5500"
+        ],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
-
     logger.info(f"✅ CORS enabled for {vercel_url}")
 
     # =====================================================
@@ -169,3 +175,4 @@ app = create_fastapi_app()
 if __name__ == "__main__":
     create_tables()
     run_app(app)
+
