@@ -20,7 +20,6 @@ class CacheService:
                     url=settings.redis_url,
                     token=settings.redis_token
                 )
-                # test
                 self.redis.ping()
                 self.available = True
                 logger.info("Upstash Redis conectado correctamente.")
@@ -30,12 +29,23 @@ class CacheService:
             logger.error(f"Redis no disponible: {e}")
             self.available = False
 
+    # ---------------------------------------------------------------------
+    # ✔️ ACÁ ESTÁ EL MÉTODO QUE FALTABA
+    # ---------------------------------------------------------------------
+    def build_key(self, *parts) -> str:
+        """
+        Construye claves con formato uniforme.
+        Ejemplo: build_key("categories", "list", "limit", 100) 
+        → "categories:list:limit:100"
+        """
+        return ":".join(str(p) for p in parts)
+
     def is_available(self) -> bool:
         return self.available
 
-    # --------------------------------------------------------------------------------
-    #   IMPLEMENTACIÓN PROPIA DE TTL (porque Upstash no usa expire())
-    # --------------------------------------------------------------------------------
+    # ---------------------------------------------------------------------
+    # TTL manual porque Upstash NO tiene expire()
+    # ---------------------------------------------------------------------
 
     def set(self, key: str, value: Any, ttl_seconds: int = 300) -> None:
         if not self.is_available():
@@ -44,7 +54,6 @@ class CacheService:
         try:
             expires_at = time.time() + ttl_seconds
 
-            # Guardamos un bloque JSON con el valor + timestamp de expiración
             payload = json.dumps({
                 "value": value,
                 "expires_at": expires_at
@@ -65,7 +74,6 @@ class CacheService:
             if raw is None:
                 return None
 
-            # Upstash devuelve strings → los convertimos
             try:
                 data = json.loads(raw)
             except:
@@ -75,17 +83,14 @@ class CacheService:
             expires_at = data.get("expires_at")
             value = data.get("value")
 
-            # Expirado → lo eliminamos
             if expires_at and time.time() > expires_at:
                 self.redis.delete(key)
                 return None
 
-            # El valor puede venir como string JSON → convertimos
             if isinstance(value, str):
                 try:
                     return json.loads(value)
                 except:
-                    # si no es JSON, retornamos el string intacto
                     return value
 
             return value
@@ -106,15 +111,10 @@ class CacheService:
             logger.error(f"Redis DEL error: {e}")
 
     def clear_prefix(self, prefix: str) -> None:
-        """
-        Borra todas las claves que empiecen con cierto prefijo.
-        Útil para cuando creas/actualizas/eliminás productos o categorías.
-        """
         if not self.is_available():
             return
 
         try:
-            # Upstash no soporta KEYS, así que usamos SCAN
             cursor = "0"
             while cursor != 0:
                 cursor, keys = self.redis.scan(cursor=cursor, match=f"{prefix}*")
@@ -125,8 +125,9 @@ class CacheService:
             logger.error(f"Redis CLEAR PREFIX error: {e}")
 
 
-# Instancia global (lo que importan los servicios)
+# instancia global
 cache_service = CacheService()
+
 
 
 
