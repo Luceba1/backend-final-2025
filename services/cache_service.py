@@ -22,8 +22,8 @@ class CacheService:
 
     async def init(self):
         """
-        Ya no hace ping ni usa async.
-        Solo carga el cliente.
+        Inicializa el cliente Redis (REST).
+        No usa async real, solo prepara el cliente.
         """
         try:
             client = get_redis_client()
@@ -67,15 +67,39 @@ class CacheService:
             return None
 
     # -----------------------------
-    # SET
+    # SET (CORREGIDO)
     # -----------------------------
     def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         if not self.is_available():
             return False
 
         try:
+            # Conversor universal para JSON
+            def default(o):
+                import datetime
+                from decimal import Decimal
+
+                # Manejo datetime/date
+                if isinstance(o, (datetime.datetime, datetime.date)):
+                    return o.isoformat()
+
+                # Manejo Decimal
+                if isinstance(o, Decimal):
+                    return float(o)
+
+                # Modelo Pydantic v2
+                if hasattr(o, "model_dump"):
+                    return o.model_dump()
+
+                # SQLAlchemy model
+                if hasattr(o, "__dict__") and not str(o).startswith("<"):
+                    return {k: v for k, v in o.__dict__.items() if not k.startswith("_")}
+
+                return str(o)
+
+            # Convertimos a JSON serializable
             if not isinstance(value, str):
-                value = json.dumps(value)
+                value = json.dumps(value, default=default)
 
             ttl = ttl or self.default_ttl
 
@@ -103,13 +127,13 @@ class CacheService:
     def delete_pattern(self, pattern: str) -> int:
         """
         Upstash REST no soporta SCAN/KEYS.
-        Por lo tanto, no se puede borrar patrones.
+        No se puede borrar por patrones.
         """
         logger.info("⚠️ delete_pattern ignorado (Upstash REST no soporta KEYS)")
         return 0
 
     # -----------------------------
-    # CLEAR ALL (TAMPOCO EXISTE)
+    # CLEAR ALL (NO DISPONIBLE)
     # -----------------------------
     def clear_all(self) -> bool:
         logger.info("⚠️ clear_all no disponible en Upstash REST")
@@ -142,4 +166,5 @@ class CacheService:
 
 
 cache_service = CacheService()
+
 
