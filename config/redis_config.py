@@ -12,20 +12,23 @@ logger = logging.getLogger(__name__)
 
 
 class UpstashRedisSync:
-    """
-    Synchronous wrapper for Upstash Redis (REST API).
-    """
+    """Synchronous wrapper for Upstash Redis (REST API)."""
 
     def __init__(self):
-        self.url = os.getenv("UPSTASH_REDIS_REST_URL")
-        self.token = os.getenv("UPSTASH_REDIS_REST_TOKEN")
+        raw_url = os.getenv("UPSTASH_REDIS_REST_URL")
+        token = os.getenv("UPSTASH_REDIS_REST_TOKEN")
 
-        if not self.url or not self.token:
+        if not raw_url or not token:
             logger.warning("⚠️ Upstash Redis NOT configured")
             self.enabled = False
-        else:
-            logger.info("✅ Upstash Redis REST client configured")
-            self.enabled = True
+            return
+
+        # URL correcta (añadir /redis siempre)
+        self.url = raw_url.rstrip("/") + "/redis"
+        self.token = token
+
+        logger.info("✅ Upstash Redis REST client configured")
+        self.enabled = True
 
     # ---- PRIVATE HEADER ----
     def _headers(self):
@@ -52,7 +55,7 @@ class UpstashRedisSync:
         try:
             payload = {"value": value}
             if ttl:
-                payload["ex"] = ttl  # Upstash supports TTL via REST
+                payload["ex"] = ttl
 
             r = requests.post(
                 f"{self.url}/set/{key}",
@@ -81,16 +84,10 @@ class UpstashRedisSync:
 
     # ---- KEYS ----
     def keys(self, pattern: str):
-        """
-        Upstash REST does NOT support KEYS command.
-        We cannot scan patterns, so return empty.
-        Cache invalidation will still work logically.
-        """
         return []
 
     # ---- CLEAR DB ----
     def flushdb(self):
-        """Upstash REST does not support FLUSHDB."""
         return False
 
     # ---- HEALTH CHECK ----
@@ -106,7 +103,6 @@ class UpstashRedisSync:
             return False
 
 
-# Global instance
 redis_client = UpstashRedisSync()
 
 
@@ -116,4 +112,5 @@ def get_redis_client():
 
 def check_redis_connection() -> bool:
     return redis_client.is_available()
+
 
