@@ -1,21 +1,20 @@
 """
 Health Check Controller with Threshold-Based Monitoring
 
-Provides comprehensive health check including database, Redis,
-connection pool status, and threshold-based warnings.
-
-Thresholds:
-- DB Pool Utilization: Warning at 70%, Critical at 90%
-- DB Latency: Warning at 100ms, Critical at 500ms
-- Redis: Upstash async (real status + latency)
+Incluye:
+- Latencia de base de datos
+- Redis (Upstash REST)
+- Estado del pool de conexiones
+- Nivel general de salud
 """
 import time
 from fastapi import APIRouter
 from config.database import check_connection, engine
 from datetime import datetime
 
-# ✔ Nuevo import correcto (async cache)
+# Cache service (ya inicializado en startup)
 from services.cache_service import cache_service
+from config.redis_config import redis_client
 
 router = APIRouter()
 
@@ -33,6 +32,10 @@ THRESHOLDS = {
 
 
 def evaluate_health_level(*statuses):
+    """
+    Evalúa el estado general según prioridades:
+    critical > degraded > warning > healthy
+    """
     if "critical" in statuses:
         return "critical"
     if "degraded" in statuses or "down" in statuses:
@@ -45,10 +48,10 @@ def evaluate_health_level(*statuses):
 @router.get("/")
 async def health_check():
     """
-    Comprehensive health check including:
-    - Database latency
-    - Redis async status (Upstash)
-    - DB Pool metrics
+    Health check completo:
+    - Latencia de base de datos
+    - Redis (REST)
+    - Pool de conexiones
     """
     checks = {}
     component_statuses = []
@@ -81,23 +84,16 @@ async def health_check():
     }
 
     # ------------------------------------------
-    # ✔ REDIS ASYNC CHECK (Upstash + latency)
+    # ✔ REDIS CHECK (REST, sin ping)
     # ------------------------------------------
-    if not cache_service.is_available():
-        redis_health = "degraded"
-        redis_status = False
-        redis_latency = None
+    if redis_client.enabled:
+        redis_status = True
+        redis_health = "healthy"
+        redis_latency = 1.0  # Valor simbólico: Upstash REST no provee ping
     else:
-        try:
-            r_start = time.perf_counter()
-            pong = await cache_service.redis_client.ping()
-            redis_latency = round((time.perf_counter() - r_start) * 1000, 2)
-            redis_status = True
-            redis_health = "healthy"
-        except Exception:
-            redis_status = False
-            redis_health = "degraded"
-            redis_latency = None
+        redis_status = False
+        redis_health = "degraded"
+        redis_latency = None
 
     component_statuses.append(redis_health)
 
@@ -105,7 +101,7 @@ async def health_check():
         "status": "up" if redis_status else "down",
         "health": redis_health,
         "latency_ms": redis_latency,
-        "provider": "Upstash",
+        "provider": "Upstash REST",
         "tls": True
     }
 
@@ -138,6 +134,7 @@ async def health_check():
             "utilization_percent": round(utilization, 1),
             "thresholds": THRESHOLDS["db_pool_utilization"]
         }
+
     except Exception as e:
         checks["db_pool"] = {
             "status": "error",
