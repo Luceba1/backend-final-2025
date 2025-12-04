@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+from datetime import datetime, date
+from decimal import Decimal
 from typing import Optional, Any, Callable
 
 from config.redis_config import get_redis_client
@@ -9,10 +11,39 @@ from utils.logging_utils import get_sanitized_logger
 logger = get_sanitized_logger(__name__)
 
 
+# ----------------------------------------
+# JSON ENCODER QUE SOPORTA datetime y Decimal
+# ----------------------------------------
+def safe_json_encode(obj):
+    """
+    Convierte automáticamente:
+    - datetime → ISO string
+    - date → ISO string
+    - Decimal → float
+    - Objetos → dict
+    """
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+
+    if isinstance(obj, Decimal):
+        return float(obj)
+
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+
+    if hasattr(obj, "__dict__"):
+        return obj.__dict__
+
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+
+# ----------------------------------------
+# CACHE SERVICE (para Upstash REST)
+# ----------------------------------------
 class CacheService:
     """
-    Cache síncrono usando Upstash Redis vía REST.
-    Compatible con todos los servicios existentes.
+    Cache sincronizado usando Upstash REST.
+    Totalmente compatible con servicios sync de FastAPI.
     """
 
     def __init__(self):
@@ -22,8 +53,7 @@ class CacheService:
 
     async def init(self):
         """
-        Inicializa el cliente Redis (REST).
-        No usa async real, solo prepara el cliente.
+        Inicialización simple. No realiza ping.
         """
         try:
             client = get_redis_client()
@@ -52,58 +82,31 @@ class CacheService:
     def get(self, key: str) -> Optional[Any]:
         if not self.is_available():
             return None
+
         try:
             value = self.redis_client.get(key)
-            if value is None:
+            if not value:
                 return None
 
-            try:
-                return json.loads(value)
-            except:
-                return None
+            return json.loads(value)
 
         except Exception as e:
             logger.error(f"Cache GET error for '{key}': {e}")
             return None
 
     # -----------------------------
-    # SET (CORREGIDO)
+    # SET
     # -----------------------------
     def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         if not self.is_available():
             return False
 
         try:
-            # Conversor universal para JSON
-            def default(o):
-                import datetime
-                from decimal import Decimal
-
-                # Manejo datetime/date
-                if isinstance(o, (datetime.datetime, datetime.date)):
-                    return o.isoformat()
-
-                # Manejo Decimal
-                if isinstance(o, Decimal):
-                    return float(o)
-
-                # Modelo Pydantic v2
-                if hasattr(o, "model_dump"):
-                    return o.model_dump()
-
-                # SQLAlchemy model
-                if hasattr(o, "__dict__") and not str(o).startswith("<"):
-                    return {k: v for k, v in o.__dict__.items() if not k.startswith("_")}
-
-                return str(o)
-
-            # Convertimos a JSON serializable
-            if not isinstance(value, str):
-                value = json.dumps(value, default=default)
+            # Convertimos el valor a JSON seguro
+            encoded = json.dumps(value, default=safe_json_encode)
 
             ttl = ttl or self.default_ttl
-
-            return self.redis_client.set(key, value, ttl)
+            return self.redis_client.set(key, encoded, ttl)
 
         except Exception as e:
             logger.error(f"Cache SET error for '{key}': {e}")
@@ -115,6 +118,7 @@ class CacheService:
     def delete(self, key: str) -> bool:
         if not self.is_available():
             return False
+
         try:
             return self.redis_client.delete(key)
         except Exception as e:
@@ -122,25 +126,21 @@ class CacheService:
             return False
 
     # -----------------------------
-    # DELETE PATTERN (NO DISPONIBLE)
+    # DELETE PATTERN (no soportado)
     # -----------------------------
     def delete_pattern(self, pattern: str) -> int:
-        """
-        Upstash REST no soporta SCAN/KEYS.
-        No se puede borrar por patrones.
-        """
         logger.info("⚠️ delete_pattern ignorado (Upstash REST no soporta KEYS)")
         return 0
 
     # -----------------------------
-    # CLEAR ALL (NO DISPONIBLE)
+    # CLEAR ALL (no soportado)
     # -----------------------------
     def clear_all(self) -> bool:
         logger.info("⚠️ clear_all no disponible en Upstash REST")
         return False
 
     # -----------------------------
-    # GET/SET
+    # GET OR SET
     # -----------------------------
     def get_or_set(self, key: str, callback: Callable[[], Any], ttl: Optional[int] = None):
         if not self.is_available():
@@ -150,7 +150,10 @@ class CacheService:
         if cached is not None:
             return cached
 
+        # Obtener valor desde DB
         value = callback()
+
+        # Guardar en Redis
         self.set(key, value, ttl)
         return value
 
