@@ -1,8 +1,7 @@
 import json
 import logging
 import os
-import time
-from typing import Optional, Any, Callable
+from typing import Optional, Any, Callable, Awaitable
 
 from config.redis_config import get_redis_client
 from utils.logging_utils import get_sanitized_logger
@@ -12,35 +11,36 @@ logger = get_sanitized_logger(__name__)
 
 class CacheService:
     """
-    Servicio de caché usando Redis (Upstash/Render compatible).
-    Si no hay conexión, funciona sin explotar.
+    Cache usando Redis asyncio (Upstash/Render).
+    Todos los métodos son async para evitar errores tipo:
+    "coroutine was never awaited"
     """
 
     def __init__(self):
-        # Intentar cliente Redis
-        client = None
+        self.redis_client = None
+        self.enabled = False
+
+    async def init(self):
+        """
+        Inicialización asíncrona (se llama en startup).
+        """
         try:
             client = get_redis_client()
             if client:
-                client.ping()
-        except Exception:
-            client = None
-
-        # Si Redis funciona → habilitado
-        if client:
-            self.enabled = True
-            self.redis_client = client
-            logger.info("✅ Redis enabled (Upstash/Render)")
-        else:
+                await client.ping()
+                self.redis_client = client
+                self.enabled = True
+                logger.info("✅ Redis enabled (Upstash/Render)")
+            else:
+                logger.warning("⚠️ Redis disabled: no client available")
+        except Exception as e:
+            logger.error(f"❌ Redis init failed: {e}")
             self.enabled = False
-            self.redis_client = None
-            logger.warning("⚠️ Redis disabled: no connection")
 
-        self.default_ttl = int(os.getenv("REDIS_CACHE_TTL", "300"))  # 5 min
-        self.lock_timeout = 10
+        self.default_ttl = int(os.getenv("REDIS_CACHE_TTL", "300"))
 
     # -----------------------------
-    # ESTADO BÁSICO
+    # ESTADO
     # -----------------------------
     def is_available(self) -> bool:
         return self.enabled and self.redis_client is not None
@@ -48,17 +48,16 @@ class CacheService:
     # -----------------------------
     # GET
     # -----------------------------
-    def get(self, key: str) -> Optional[Any]:
+    async def get(self, key: str) -> Optional[Any]:
         if not self.is_available():
             return None
         try:
-            value = self.redis_client.get(key)
+            value = await self.redis_client.get(key)
             if value is None:
                 return None
 
             try:
-                decoded = json.loads(value)
-                return decoded
+                return json.loads(value)
             except:
                 return None
 
@@ -69,7 +68,7 @@ class CacheService:
     # -----------------------------
     # SET
     # -----------------------------
-    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+    async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         if not self.is_available():
             return False
         try:
@@ -77,7 +76,7 @@ class CacheService:
                 value = json.dumps(value)
 
             ttl = ttl or self.default_ttl
-            self.redis_client.setex(key, ttl, value)
+            await self.redis_client.setex(key, ttl, value)
             return True
         except Exception as e:
             logger.error(f"Cache SET error for '{key}': {e}")
@@ -86,11 +85,11 @@ class CacheService:
     # -----------------------------
     # DELETE
     # -----------------------------
-    def delete(self, key: str) -> bool:
+    async def delete(self, key: str) -> bool:
         if not self.is_available():
             return False
         try:
-            self.redis_client.delete(key)
+            await self.redis_client.delete(key)
             return True
         except Exception as e:
             logger.error(f"Cache DELETE error for '{key}': {e}")
@@ -99,13 +98,13 @@ class CacheService:
     # -----------------------------
     # DELETE PATTERN
     # -----------------------------
-    def delete_pattern(self, pattern: str) -> int:
+    async def delete_pattern(self, pattern: str) -> int:
         if not self.is_available():
             return 0
         try:
-            keys = self.redis_client.keys(pattern)
+            keys = await self.redis_client.keys(pattern)
             if keys:
-                return self.redis_client.delete(*keys)
+                return await self.redis_client.delete(*keys)
             return 0
         except Exception as e:
             logger.error(f"Cache DELETE PATTERN error for '{pattern}': {e}")
@@ -114,28 +113,29 @@ class CacheService:
     # -----------------------------
     # CLEAR
     # -----------------------------
-    def clear_all(self) -> bool:
+    async def clear_all(self) -> bool:
         if not self.is_available():
             return False
         try:
-            self.redis_client.flushdb()
+            await self.redis_client.flushdb()
             return True
         except Exception as e:
             logger.error(f"Cache CLEAR ALL error: {e}")
             return False
 
     # -----------------------------
-    # GET/SET with LOCK
+    # GET/SET con callback
     # -----------------------------
-    def get_or_set(self, key: str, callback: Callable[[], Any], ttl: Optional[int] = None):
+    async def get_or_set(self, key: str, callback: Callable[[], Awaitable[Any]], ttl: Optional[int] = None):
         if not self.is_available():
-            return callback()
-        cached = self.get(key)
+            return await callback()
+
+        cached = await self.get(key)
         if cached is not None:
             return cached
 
-        value = callback()
-        self.set(key, value, ttl)
+        value = await callback()
+        await self.set(key, value, ttl)
         return value
 
     # -----------------------------
