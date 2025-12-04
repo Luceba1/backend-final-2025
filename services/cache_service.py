@@ -1,7 +1,8 @@
 import json
 import logging
 import os
-from typing import Optional, Any, Callable, Awaitable
+import asyncio
+from typing import Optional, Any, Callable
 
 from config.redis_config import get_redis_client
 from utils.logging_utils import get_sanitized_logger
@@ -11,18 +12,19 @@ logger = get_sanitized_logger(__name__)
 
 class CacheService:
     """
-    Cache usando Redis asyncio (Upstash/Render).
-    Todos los métodos son async para evitar errores tipo:
-    "coroutine was never awaited"
+    Cache síncrono usando Redis asyncio por debajo.
+    Compatible con todos los servicios existentes (sync).
     """
 
     def __init__(self):
         self.redis_client = None
         self.enabled = False
+        self.loop = None  # event loop interno
 
     async def init(self):
         """
         Inicialización asíncrona (se llama en startup).
+        Prepara el cliente Redis y el event loop.
         """
         try:
             client = get_redis_client()
@@ -33,6 +35,14 @@ class CacheService:
                 logger.info("✅ Redis enabled (Upstash/Render)")
             else:
                 logger.warning("⚠️ Redis disabled: no client available")
+
+            # Creamos un event loop propio
+            try:
+                self.loop = asyncio.get_event_loop()
+            except RuntimeError:
+                self.loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(self.loop)
+
         except Exception as e:
             logger.error(f"❌ Redis init failed: {e}")
             self.enabled = False
@@ -46,13 +56,28 @@ class CacheService:
         return self.enabled and self.redis_client is not None
 
     # -----------------------------
+    # HELPER SYNC-WRAPPER
+    # -----------------------------
+    def _run(self, coro):
+        """
+        Ejecuta coroutines ASYNC como SYNC.
+        """
+        try:
+            return self.loop.run_until_complete(coro)
+        except RuntimeError:
+            # Si no hay loop activo, creamos uno
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            return loop.run_until_complete(coro)
+
+    # -----------------------------
     # GET
     # -----------------------------
-    async def get(self, key: str) -> Optional[Any]:
+    def get(self, key: str) -> Optional[Any]:
         if not self.is_available():
             return None
         try:
-            value = await self.redis_client.get(key)
+            value = self._run(self.redis_client.get(key))
             if value is None:
                 return None
 
@@ -68,7 +93,7 @@ class CacheService:
     # -----------------------------
     # SET
     # -----------------------------
-    async def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+    def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         if not self.is_available():
             return False
         try:
@@ -76,7 +101,7 @@ class CacheService:
                 value = json.dumps(value)
 
             ttl = ttl or self.default_ttl
-            await self.redis_client.setex(key, ttl, value)
+            self._run(self.redis_client.setex(key, ttl, value))
             return True
         except Exception as e:
             logger.error(f"Cache SET error for '{key}': {e}")
@@ -85,11 +110,11 @@ class CacheService:
     # -----------------------------
     # DELETE
     # -----------------------------
-    async def delete(self, key: str) -> bool:
+    def delete(self, key: str) -> bool:
         if not self.is_available():
             return False
         try:
-            await self.redis_client.delete(key)
+            self._run(self.redis_client.delete(key))
             return True
         except Exception as e:
             logger.error(f"Cache DELETE error for '{key}': {e}")
@@ -98,13 +123,13 @@ class CacheService:
     # -----------------------------
     # DELETE PATTERN
     # -----------------------------
-    async def delete_pattern(self, pattern: str) -> int:
+    def delete_pattern(self, pattern: str) -> int:
         if not self.is_available():
             return 0
         try:
-            keys = await self.redis_client.keys(pattern)
+            keys = self._run(self.redis_client.keys(pattern))
             if keys:
-                return await self.redis_client.delete(*keys)
+                return self._run(self.redis_client.delete(*keys))
             return 0
         except Exception as e:
             logger.error(f"Cache DELETE PATTERN error for '{pattern}': {e}")
@@ -113,29 +138,29 @@ class CacheService:
     # -----------------------------
     # CLEAR
     # -----------------------------
-    async def clear_all(self) -> bool:
+    def clear_all(self) -> bool:
         if not self.is_available():
             return False
         try:
-            await self.redis_client.flushdb()
+            self._run(self.redis_client.flushdb())
             return True
         except Exception as e:
             logger.error(f"Cache CLEAR ALL error: {e}")
             return False
 
     # -----------------------------
-    # GET/SET con callback
+    # GET/SET con callback (SYNC)
     # -----------------------------
-    async def get_or_set(self, key: str, callback: Callable[[], Awaitable[Any]], ttl: Optional[int] = None):
+    def get_or_set(self, key: str, callback: Callable[[], Any], ttl: Optional[int] = None):
         if not self.is_available():
-            return await callback()
+            return callback()
 
-        cached = await self.get(key)
+        cached = self.get(key)
         if cached is not None:
             return cached
 
-        value = await callback()
-        await self.set(key, value, ttl)
+        value = callback()
+        self.set(key, value, ttl)
         return value
 
     # -----------------------------
@@ -150,4 +175,3 @@ class CacheService:
 
 
 cache_service = CacheService()
-
