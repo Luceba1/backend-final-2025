@@ -12,15 +12,11 @@ logger = get_sanitized_logger(__name__)
 
 class CacheService:
     """
-    Servicio de caché seguro y compatible con todo el backend original.
-    Redis queda AUTOMÁTICAMENTE deshabilitado en Render,
-    evitando datos corruptos y errores de JSON.
+    Servicio de caché usando Redis (Upstash/Render compatible).
+    Si no hay conexión, funciona sin explotar.
     """
 
     def __init__(self):
-        # Detectar si estamos corriendo en Render
-        running_on_render = os.getenv("RENDER", "").lower() == "true"
-
         # Intentar cliente Redis
         client = None
         try:
@@ -30,15 +26,15 @@ class CacheService:
         except Exception:
             client = None
 
-        # Si estamos en Render o Redis no existe → cache OFF
-        if running_on_render or client is None:
-            self.enabled = False
-            self.redis_client = None
-            logger.warning("⚠️ Redis disabled (Render or connection failure)")
-        else:
+        # Si Redis funciona → habilitado
+        if client:
             self.enabled = True
             self.redis_client = client
-            logger.info("✅ Redis enabled (local environment)")
+            logger.info("✅ Redis enabled (Upstash/Render)")
+        else:
+            self.enabled = False
+            self.redis_client = None
+            logger.warning("⚠️ Redis disabled: no connection")
 
         self.default_ttl = int(os.getenv("REDIS_CACHE_TTL", "300"))  # 5 min
         self.lock_timeout = 10
@@ -60,11 +56,8 @@ class CacheService:
             if value is None:
                 return None
 
-            # Evitar strings corruptos
             try:
                 decoded = json.loads(value)
-                if isinstance(decoded, str):
-                    return None  # proteger contra doble-JSON
                 return decoded
             except:
                 return None
@@ -157,3 +150,4 @@ class CacheService:
 
 
 cache_service = CacheService()
+
