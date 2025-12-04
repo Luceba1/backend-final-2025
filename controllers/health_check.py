@@ -7,41 +7,32 @@ connection pool status, and threshold-based warnings.
 Thresholds:
 - DB Pool Utilization: Warning at 70%, Critical at 90%
 - DB Latency: Warning at 100ms, Critical at 500ms
-- Redis: Binary (up/down)
+- Redis: Upstash async (real status + latency)
 """
 import time
 from fastapi import APIRouter
 from config.database import check_connection, engine
-from config.redis_config import check_redis_connection
 from datetime import datetime
+
+# ✔ Nuevo import correcto (async cache)
+from services.cache_service import cache_service
 
 router = APIRouter()
 
 # Health check thresholds
 THRESHOLDS = {
     "db_pool_utilization": {
-        "warning": 70.0,  # %
-        "critical": 90.0  # %
+        "warning": 70.0,
+        "critical": 90.0
     },
     "db_latency": {
-        "warning": 100.0,  # milliseconds
-        "critical": 500.0  # milliseconds
+        "warning": 100.0,
+        "critical": 500.0
     }
 }
 
 
 def evaluate_health_level(*statuses):
-    """
-    Evaluate overall health based on multiple component statuses.
-
-    Priority: critical > degraded > warning > healthy
-
-    Args:
-        *statuses: Variable number of status strings
-
-    Returns:
-        Overall health status string
-    """
     if "critical" in statuses:
         return "critical"
     if "degraded" in statuses or "down" in statuses:
@@ -52,27 +43,19 @@ def evaluate_health_level(*statuses):
 
 
 @router.get("/")
-def health_check():
+async def health_check():
     """
-    Comprehensive health check endpoint with threshold-based monitoring
-
-    Returns the status of:
-    - Database connection (with latency thresholds)
-    - Redis cache
-    - Database connection pool metrics (with utilization thresholds)
-    - System timestamp
-    - Overall health level (healthy/warning/degraded/critical)
-
-    Status Levels:
-    - healthy: All systems operational
-    - warning: Performance degradation detected (exceeds warning thresholds)
-    - degraded: Non-critical component down (e.g., Redis)
-    - critical: Critical component down or exceeds critical thresholds
+    Comprehensive health check including:
+    - Database latency
+    - Redis async status (Upstash)
+    - DB Pool metrics
     """
     checks = {}
     component_statuses = []
 
-    # Database health check with latency thresholds
+    # ------------------------------------------
+    # ✔ DATABASE CHECK (latency + thresholds)
+    # ------------------------------------------
     start = time.time()
     db_status = check_connection()
     db_latency_ms = round((time.time() - start) * 1000, 2)
@@ -94,30 +77,47 @@ def health_check():
         "status": "up" if db_status else "down",
         "health": db_health,
         "latency_ms": db_latency_ms if db_status else None,
-        "thresholds": {
-            "warning_ms": THRESHOLDS["db_latency"]["warning"],
-            "critical_ms": THRESHOLDS["db_latency"]["critical"]
-        }
+        "thresholds": THRESHOLDS["db_latency"]
     }
 
-    # Redis health check
-    redis_status = check_redis_connection()
-    redis_health = "healthy" if redis_status else "degraded"
+    # ------------------------------------------
+    # ✔ REDIS ASYNC CHECK (Upstash + latency)
+    # ------------------------------------------
+    if not cache_service.is_available():
+        redis_health = "degraded"
+        redis_status = False
+        redis_latency = None
+    else:
+        try:
+            r_start = time.perf_counter()
+            pong = await cache_service.redis_client.ping()
+            redis_latency = round((time.perf_counter() - r_start) * 1000, 2)
+            redis_status = True
+            redis_health = "healthy"
+        except Exception:
+            redis_status = False
+            redis_health = "degraded"
+            redis_latency = None
+
     component_statuses.append(redis_health)
 
     checks["redis"] = {
         "status": "up" if redis_status else "down",
-        "health": redis_health
+        "health": redis_health,
+        "latency_ms": redis_latency,
+        "provider": "Upstash",
+        "tls": True
     }
 
-    # Database connection pool metrics with utilization thresholds
+    # ------------------------------------------
+    # ✔ DB POOL METRICS (SQLAlchemy)
+    # ------------------------------------------
     try:
         pool = engine.pool
         total_connections = pool.size() + pool.overflow()
         checked_out = pool.checkedout()
         utilization = (checked_out / total_connections * 100) if total_connections > 0 else 0
 
-        # Evaluate pool health based on utilization
         if utilization >= THRESHOLDS["db_pool_utilization"]["critical"]:
             pool_health = "critical"
             component_statuses.append("critical")
@@ -136,10 +136,7 @@ def health_check():
             "overflow": pool.overflow(),
             "total_capacity": total_connections,
             "utilization_percent": round(utilization, 1),
-            "thresholds": {
-                "warning_percent": THRESHOLDS["db_pool_utilization"]["warning"],
-                "critical_percent": THRESHOLDS["db_pool_utilization"]["critical"]
-            }
+            "thresholds": THRESHOLDS["db_pool_utilization"]
         }
     except Exception as e:
         checks["db_pool"] = {
@@ -149,7 +146,9 @@ def health_check():
         }
         component_statuses.append("critical")
 
-    # Overall status based on all components
+    # ------------------------------------------
+    # ✔ OVERALL STATUS
+    # ------------------------------------------
     overall_status = evaluate_health_level(*component_statuses)
 
     return {
