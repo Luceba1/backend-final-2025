@@ -11,8 +11,10 @@ from starlette.responses import JSONResponse
 
 from config.logging_config import setup_logging
 from config.database import create_tables, engine
-from config.redis_config import check_redis_connection
 from middleware.request_id_middleware import RequestIDMiddleware
+
+# ✔ Import del CacheService (necesario para iniciar Redis correctamente)
+from services.cache_service import cache_service
 
 # Setup logging
 setup_logging()
@@ -76,15 +78,24 @@ def create_fastapi_app() -> FastAPI:
 
     logger.info("✅ CORS enabled for *.vercel.app (wildcard)")
 
+    # -----------------------------------------
+    # ✔️ STARTUP con Redis asyncio correctamente inicializado
+    # -----------------------------------------
     @fastapi_app.on_event("startup")
     async def startup_event():
         logger.info("🚀 Starting FastAPI E-commerce API...")
 
-        if check_redis_connection():
-            logger.info("✅ Redis cache available")
-        else:
-            logger.warning("⚠️ Redis NOT available")
+        # Inicializar Redis Cache (async)
+        await cache_service.init()
 
+        if cache_service.is_available():
+            logger.info("✅ Redis cache initialized successfully")
+        else:
+            logger.warning("⚠️ Redis cache NOT available — running without cache")
+
+    # -----------------------------------------
+    # Shutdown
+    # -----------------------------------------
     @fastapi_app.on_event("shutdown")
     async def shutdown_event():
         logger.info("👋 Shutting down API...")
