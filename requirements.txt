@@ -19,6 +19,9 @@ certifi
 idna
 h11
 
+redis>=5.0.0
+uvloop
+
 Deprecated
 wrapt
 
