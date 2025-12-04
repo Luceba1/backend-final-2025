@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import asyncio
 from typing import Optional, Any, Callable
 
 from config.redis_config import get_redis_client
@@ -12,42 +11,34 @@ logger = get_sanitized_logger(__name__)
 
 class CacheService:
     """
-    Cache síncrono usando Redis asyncio por debajo.
-    Compatible con todos los servicios existentes (sync).
+    Cache síncrono usando Upstash Redis vía REST.
+    Compatible con todos los servicios existentes.
     """
 
     def __init__(self):
         self.redis_client = None
         self.enabled = False
-        self.loop = None  # event loop interno
+        self.default_ttl = int(os.getenv("REDIS_CACHE_TTL", "300"))
 
     async def init(self):
         """
-        Inicialización asíncrona (se llama en startup).
-        Prepara el cliente Redis y el event loop.
+        Ya no hace ping ni usa async.
+        Solo carga el cliente.
         """
         try:
             client = get_redis_client()
-            if client:
-                await client.ping()
+
+            if client and client.enabled:
                 self.redis_client = client
                 self.enabled = True
-                logger.info("✅ Redis enabled (Upstash/Render)")
+                logger.info("✅ Redis enabled (Upstash REST)")
             else:
                 logger.warning("⚠️ Redis disabled: no client available")
-
-            # Creamos un event loop propio
-            try:
-                self.loop = asyncio.get_event_loop()
-            except RuntimeError:
-                self.loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(self.loop)
+                self.enabled = False
 
         except Exception as e:
             logger.error(f"❌ Redis init failed: {e}")
             self.enabled = False
-
-        self.default_ttl = int(os.getenv("REDIS_CACHE_TTL", "300"))
 
     # -----------------------------
     # ESTADO
@@ -56,28 +47,13 @@ class CacheService:
         return self.enabled and self.redis_client is not None
 
     # -----------------------------
-    # HELPER SYNC-WRAPPER
-    # -----------------------------
-    def _run(self, coro):
-        """
-        Ejecuta coroutines ASYNC como SYNC.
-        """
-        try:
-            return self.loop.run_until_complete(coro)
-        except RuntimeError:
-            # Si no hay loop activo, creamos uno
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            return loop.run_until_complete(coro)
-
-    # -----------------------------
     # GET
     # -----------------------------
     def get(self, key: str) -> Optional[Any]:
         if not self.is_available():
             return None
         try:
-            value = self._run(self.redis_client.get(key))
+            value = self.redis_client.get(key)
             if value is None:
                 return None
 
@@ -96,13 +72,15 @@ class CacheService:
     def set(self, key: str, value: Any, ttl: Optional[int] = None) -> bool:
         if not self.is_available():
             return False
+
         try:
             if not isinstance(value, str):
                 value = json.dumps(value)
 
             ttl = ttl or self.default_ttl
-            self._run(self.redis_client.setex(key, ttl, value))
-            return True
+
+            return self.redis_client.set(key, value, ttl)
+
         except Exception as e:
             logger.error(f"Cache SET error for '{key}': {e}")
             return False
@@ -114,42 +92,31 @@ class CacheService:
         if not self.is_available():
             return False
         try:
-            self._run(self.redis_client.delete(key))
-            return True
+            return self.redis_client.delete(key)
         except Exception as e:
-            logger.error(f"Cache DELETE error for '{key}': {e}")
+            logger.error(f"Cache DELETE error: {e}")
             return False
 
     # -----------------------------
-    # DELETE PATTERN
+    # DELETE PATTERN (NO DISPONIBLE)
     # -----------------------------
     def delete_pattern(self, pattern: str) -> int:
-        if not self.is_available():
-            return 0
-        try:
-            keys = self._run(self.redis_client.keys(pattern))
-            if keys:
-                return self._run(self.redis_client.delete(*keys))
-            return 0
-        except Exception as e:
-            logger.error(f"Cache DELETE PATTERN error for '{pattern}': {e}")
-            return 0
+        """
+        Upstash REST no soporta SCAN/KEYS.
+        Por lo tanto, no se puede borrar patrones.
+        """
+        logger.info("⚠️ delete_pattern ignorado (Upstash REST no soporta KEYS)")
+        return 0
 
     # -----------------------------
-    # CLEAR
+    # CLEAR ALL (TAMPOCO EXISTE)
     # -----------------------------
     def clear_all(self) -> bool:
-        if not self.is_available():
-            return False
-        try:
-            self._run(self.redis_client.flushdb())
-            return True
-        except Exception as e:
-            logger.error(f"Cache CLEAR ALL error: {e}")
-            return False
+        logger.info("⚠️ clear_all no disponible en Upstash REST")
+        return False
 
     # -----------------------------
-    # GET/SET con callback (SYNC)
+    # GET/SET
     # -----------------------------
     def get_or_set(self, key: str, callback: Callable[[], Any], ttl: Optional[int] = None):
         if not self.is_available():
@@ -175,3 +142,4 @@ class CacheService:
 
 
 cache_service = CacheService()
+
